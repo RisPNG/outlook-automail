@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src https://composer.outlookautomail.invalid 'unsafe-inline'; img-src https://composer.outlookautomail.invalid; frame-src about:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <title>Email message</title>
+    <link rel="stylesheet" href="/MessageComposer.css">
+    <script src="/MessageComposer.js" defer></script>
+</head>
+<body>
+    <main class="composer" aria-label="Email message composer">
+        <section class="message-pane" aria-labelledby="editor-heading">
+            <h1 id="editor-heading">Write email</h1>
+            <div id="editor" class="email-paper" contenteditable="true" role="textbox" aria-label="Email message body" aria-multiline="true" spellcheck="true"></div>
+        </section>
+        <section class="message-pane" aria-labelledby="preview-heading">
+            <h1 id="preview-heading">Recipient preview</h1>
+            <div class="subject-preview"><span class="subject-label">Subject</span><div id="preview-subject" aria-label="Rendered email subject"></div></div>
+            <iframe id="preview" title="Rendered email body" sandbox=""></iframe>
+        </section>
+    </main>
+    <p id="notice" class="notice" role="status" hidden></p>
+</body>
+</html>

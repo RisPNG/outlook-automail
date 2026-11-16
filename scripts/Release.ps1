@@ -13,7 +13,7 @@ if ($repositoryUri.Scheme -ne 'https' -or $repositoryUri.Host -ne 'github.com' -
     throw 'release.json must name the public GitHub releases repository.'
 }
 $repository = $repositoryUri.AbsolutePath.Trim('/')
-[xml]$project = Get-Content -LiteralPath 'src/SigPoAutomail/SigPoAutomail.csproj' -Raw
+[xml]$project = Get-Content -LiteralPath 'src/OutlookAutomail/OutlookAutomail.csproj' -Raw
 $baseVersion = [Version]($project.Project.PropertyGroup.Version | Select-Object -First 1)
 if (-not $Version) {
     $Version = if ($env:GITHUB_RUN_NUMBER) { "$($baseVersion.Major).$($baseVersion.Minor).$env:GITHUB_RUN_NUMBER" } else { $baseVersion.ToString(3) }
@@ -55,7 +55,7 @@ try {
     if ($releaseStatus -eq 200 -and $publicReleases.Count -gt 0) {
         & mise exec -- dotnet vpk download github --repoUrl $release.repository --outputDir $releaseDirectory --channel win --skip-updates --yes
     }
-    & mise exec -- dotnet vpk '[win]' pack --packId OutlookAutomail --packVersion $Version --packDir artifacts/win-x64 --mainExe OutlookAutomail.exe --packTitle 'Outlook Automail' --runtime win-x64 --channel win --outputDir $releaseDirectory --skip-updates --yes
+    & mise exec -- dotnet vpk '[win]' pack --packId OutlookAutomail --packVersion $Version --packDir artifacts/win-x64 --mainExe OutlookAutomail.exe --packTitle 'Outlook Automail' --icon src/OutlookAutomail/Assets/AppIcon.ico --splashImage src/OutlookAutomail/Assets/AppIcon.png --framework webview2 --runtime win-x64 --channel win --outputDir $releaseDirectory --skip-updates --yes
 }
 finally {
     $env:ReleaseVersion = $previousVersion

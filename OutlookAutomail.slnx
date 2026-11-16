@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/OutlookAutomail/OutlookAutomail.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/OutlookAutomail.Tests/OutlookAutomail.Tests.csproj" />
+  </Folder>
+</Solution>

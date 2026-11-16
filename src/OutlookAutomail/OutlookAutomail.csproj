@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets/AppIcon.ico</ApplicationIcon>
+    <AssemblyName>OutlookAutomail</AssemblyName>
+    <RootNamespace>OutlookAutomail</RootNamespace>
+    <Product>Outlook Automail</Product>
+    <Description>Scheduled attachment emails through classic Outlook from shared folders.</Description>
+    <Version>1.5.0</Version>
+    <Version Condition="'$(ReleaseVersion)' != ''">$(ReleaseVersion)</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../../release.json" LogicalName="OutlookAutomail.release.json" />
+    <EmbeddedResource Include="Assets/AppIcon.ico" LogicalName="OutlookAutomail.AppIcon.ico" />
+    <PackageReference Include="YamlDotNet" />
+    <PackageReference Include="Velopack" />
+    <PackageReference Include="Microsoft.Web.WebView2" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="../../README.md" Link="README.md" CopyToPublishDirectory="PreserveNewest" />
+    <InternalsVisibleTo Include="OutlookAutomail.Tests" />
+    <EmbeddedResource Include="UI/MessageComposer.html;UI/MessageComposer.css;UI/MessageComposer.js" />
+  </ItemGroup>
+</Project>

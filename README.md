@@ -6,7 +6,13 @@ A Windows tray application that sends the ready files in a configured folder as 
 
 Download the [Windows installer](https://github.com/RisPNG/outlook-automail/releases/latest/download/OutlookAutomail-win-Setup.exe). It includes the .NET runtime and installs for the current Windows user. Classic Outlook must already be installed and configured. Source code, downloads, and updates are public in this repository. Downloads and updates do not need a GitHub login.
 
+Setup also installs Microsoft's shared Evergreen WebView2 Runtime if it is missing. The message composer uses it only while its configuration window is open. Tray operation and background sending do not start a browser. A missing WebView2 installation needs an Internet connection for its Microsoft bootstrapper. Portable and development builds need the runtime installed separately.
+
 The installed app checks for updates at startup and every six hours, then downloads them in the background. A downloaded update installs when the app is in the tray and processing and Outlook automation are idle. An open window or editor keeps the update pending. You can also use Check for updates and Install update in the window or tray menu. An update never interrupts a send. The app restarts in the tray and keeps local settings and shared-folder history.
+
+Running a newer Setup replaces the existing installation after confirming the replacement and closes that installed copy if it is running. Local settings, logs, and the message editor cache are kept in `%LOCALAPPDATA%\OutlookAutomailData`, separate from the installed files, so Setup replacement keeps the computer's preferences. The downloaded updates use the idle processing checks described above.
+
+Uninstall through Windows Installed apps or open `Uninstall Outlook Automail.lnk` in the installation folder. This runs Velopack's native uninstaller, which closes the app and removes the installed files, app shortcuts, and uninstall entry. The app's uninstall callback removes its sign-in startup entry, local data folder, and package-specific Velopack log and backup. Shared folder configuration, `.automail` history, message photos, and document files stay on their shared folders. Shared folders cannot be inside the installation or local data folders. Microsoft's shared WebView2 Runtime remains available for other apps. Shared Velopack installer logs are preserved, and Velopack may recreate its package log if it rotates while finishing uninstall. Windows may retain its own installation or security history. Locked files or permission problems can prevent complete removal and are recorded by the native uninstaller.
 
 If you previously used an extracted ZIP, close that copy and install Setup once to enable automatic updates. Portable ZIPs remain available for manual use, but do not update automatically. Builds are currently unsigned, so Windows may display an unknown-publisher warning.
 
@@ -19,7 +25,7 @@ mise trust
 mise install
 mise run build
 mise run test
-mise exec -- dotnet run --project src/SigPoAutomail/SigPoAutomail.csproj
+mise exec -- dotnet run --project src/OutlookAutomail/OutlookAutomail.csproj
 ```
 
 The SDK version is pinned in `mise.toml` and `global.json`. NuGet versions are centralised in `Directory.Packages.props`, resolved dependencies are locked, and the Velopack CLI is pinned in `.config/dotnet-tools.json`.
@@ -55,7 +61,7 @@ New Outlook does not expose the required Outlook Object Model. Both editions may
 
 ## Configure a shared folder
 
-Add a folder using its UNC path, for example `\\server\purchasing\orders`. If `config.yml` already exists, the app loads that configuration. Otherwise, configure the pending and sent subfolders, To and CC addresses, subject, message, and schedules in the editor. Subfolder paths are relative to the selected root.
+Add a folder using its UNC path, for example `\\server\shared\documents`. If `config.yml` already exists, the app loads that configuration. Otherwise, configure the pending and sent subfolders, To and CC addresses, subject, message, and schedules in the editor. Subfolder paths are relative to the selected root.
 
 New local subscriptions begin paused. Enable the folder when its configuration is ready and the selected Outlook account is available. Removing a folder from one PC removes only that PC's subscription. It does not delete shared settings, files, or history.
 
@@ -85,17 +91,19 @@ Only completed, ready files should be placed directly in the pending directory. 
 
 Each run captures the ready files and the current recipients/message into a stable batch. New arrivals wait for a later run. Batch sizes are checked against the configured message-size budget, including attachment encoding overhead. The mailbox provider's message-size policy may be lower. An oversized batch stops with an error and is not silently split into several emails.
 
-## Photos in the message body
+## Write and preview the message
 
-In the shared folder editor's Message tab, choose Add photo and select a PNG, JPEG, GIF, or BMP file. The app copies it into the shared root's `Message assets` folder and inserts it into the HTML body using an embedded content ID. When adding the first photo to a plain-text body, the existing text is safely converted to HTML, date placeholders are preserved, and the photo is appended. In an existing HTML body, insertion uses the cursor position.
+Open the shared folder editor's Message tab and write directly in the email, using the toolbar for font, size, bold, italic, underline, text colour, alignment, lists, indentation, and links. Keyboard shortcuts and undo/redo work in the editor. Existing plain-text messages keep their visible line breaks, and photos appear directly where the cursor was placed. You do not need to write or read HTML markup.
 
-The Photos view lists the configured images and shows a thumbnail. Insert selected photo reuses an image in the message. Remove photo removes its body and configuration references while retaining the shared source file. `Message assets` is reserved and cannot become a pending or sent folder, even after every photo is removed.
+Recipient preview renders the resolved subject, date placeholders, formatting, and embedded photos. It updates shortly after typing. The saved HTML is the source used to build the email, with the date frozen when a batch is created. Different email clients, including classic Outlook's Word-based renderer, can vary in spacing or supported formatting. The preview does not contact external websites or load remote images. Pasted HTML keeps supported email formatting and removes active content and unsupported external resources.
+
+Choose Add photo, paste an image, or drop an image into the body to add a PNG, JPEG, GIF, or BMP. The app copies it into the shared root's `Message assets` folder and saves an embedded content ID. The Photos view lists reusable images with a thumbnail. Insert selected photo reuses an image at the cursor. Remove from message removes its placements while keeping the photo available for reuse and undo. Only photos still placed in the body are attached. `Message assets` is reserved and cannot become a pending or sent folder.
 
 The shared YAML records the body and reusable image paths, for example:
 
 ```yaml
 body_is_html: true
-body: '<p>Please find the orders for {date} attached.</p><img src="cid:signature" alt="Signature">'
+body: '<p>Please find the documents for {date} attached.</p><img src="cid:signature" alt="Signature">'
 inline_images:
 - id: signature
   path: Message assets/signature.png
@@ -110,8 +118,8 @@ Open the shared folder configuration and select the Message tab. Enter `{date}` 
 For example, these message settings use Malaysia/Singapore time:
 
 ```yaml
-subject: "Purchase orders - {date}"
-body: "Please find the purchase orders for {date:dd MMMM yyyy} attached."
+subject: "Documents - {date}"
+body: "Please find the documents for {date:dd MMMM yyyy} attached."
 body_is_html: false
 date_format: dd/MM/yyyy
 date_time_zone_id: Singapore Standard Time
@@ -167,7 +175,9 @@ Use one authoritative SMB share whose server correctly implements file sharing a
 
 ## Local data and diagnostics
 
-Local settings and application logs remain under `%LOCALAPPDATA%\South Island Garment\SIG PO Automail` for compatibility with existing installations. The saved startup preference is applied under the new app name, replacing the old startup entry. Existing single-instance and message-correlation identities remain compatible, so the rename does not abandon settings or pending batches. Shared history belongs to the configured root. Keep logs and journal files when investigating a failed run. Outlook manages its own profile and authentication data separately.
+Local settings and application logs are stored under `%LOCALAPPDATA%\OutlookAutomailData`. Shared history belongs to the configured root. Keep logs and journal files when investigating a failed run. Outlook manages its own profile and authentication data separately.
+
+This release starts fresh with new local settings, single-instance, and Outlook message identities. Before upgrading, turn off Start at Windows sign-in in earlier releases, stop every older copy, and finish or review all pending batches. This release cannot correlate Outlook messages created by earlier releases. Select the Outlook account and add the shared folders again after upgrading. Existing local files and earlier company-branded startup entries are left in place. The generic Outlook Automail startup entry uses the current saved preference and is removed on uninstall.
 
 The test suite exercises scheduling, worker selection, batch recovery, and Outlook connector behaviour with fake sessions and local temporary folders. Real Outlook security prompts, mailbox-provider synchronisation, recipient delivery, and network partitions on the actual SMB server require environment-specific verification. Tests do not start Outlook, authenticate an account, or send actual email.
 
