@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SigPoAutomail/SigPoAutomail.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SigPoAutomail.Tests/SigPoAutomail.Tests.csproj" />
+  </Folder>
+</Solution>

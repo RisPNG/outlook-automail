@@ -1,0 +1,35 @@
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install project tools
+        uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db
+      - name: Verify formatting
+        run: mise run format-check
+      - name: Build
+        run: mise run build
+      - name: Test
+        run: mise run test
+      - name: Package and publish
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: mise run release -- -Publish

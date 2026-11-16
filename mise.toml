@@ -1,0 +1,20 @@
+[tools]
+dotnet = "10.0.403"
+
+[tasks.build]
+run = "dotnet build SigPoAutomail.slnx --configuration Release"
+
+[tasks.test]
+run = "dotnet test SigPoAutomail.slnx --configuration Release"
+
+[tasks.format-check]
+run = "dotnet format SigPoAutomail.slnx --verify-no-changes --verbosity quiet"
+
+[tasks.release]
+run = "pwsh -NoProfile -File scripts/Release.ps1"
+
+[tasks.publish]
+run = "dotnet publish src/SigPoAutomail/SigPoAutomail.csproj --configuration Release --runtime win-x64 --self-contained true --output artifacts/win-x64"
+
+[tasks.publish-small]
+run = "dotnet publish src/SigPoAutomail/SigPoAutomail.csproj --configuration Release --runtime win-x64 --self-contained false --output artifacts/framework-dependent"
