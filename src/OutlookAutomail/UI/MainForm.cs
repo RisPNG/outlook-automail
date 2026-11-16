@@ -159,7 +159,7 @@ internal sealed partial class MainForm : Form
         {
             if (_folders.SelectedRows.Count == 0 || _folders.SelectedRows[0].Tag is not FolderSubscription subscription || _history.SelectedRows.Count == 0 || _history.SelectedRows[0].Tag is not RunRecord run)
                 return;
-            if (MessageBox.Show(this, $"Only continue after verifying this exact email in Outlook Sent Items or with the recipients. An email waiting in Outbox has not been confirmed sent.\n\nRun: {run.Id}\nAccount: {run.AccountAddress}\n\nConfirm that this email was already sent? This records your confirmation and archives its attachments without sending another email.", "Confirm an email was sent", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+            if (MessageBox.Show(this, $"Only continue after verifying that the exact message and every recorded document below were sent or shared successfully. Check Sent Items or reliable recipient evidence. Outbox alone is insufficient.\n\nSubject: {run.Subject}\nRun: {run.Id}\nAccount: {run.AccountAddress}\nDocuments: {string.Join(", ", run.Attachments.Where(attachment => attachment.ContentId is null).Select(attachment => attachment.Name))}\n\nConfirm this exact email or part as sent? This archives only its documents without sending another email.", "Confirm an email was sent", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
                 return;
             SetBusy(true, "Recording confirmation and archiving...");
             try
@@ -354,7 +354,9 @@ internal sealed partial class MainForm : Form
             _history.Rows.Clear();
             foreach (var run in history.OrderByDescending(run => run.CreatedUtc))
             {
-                var index = _history.Rows.Add(run.Status.ToString(), run.OccurrenceUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "Manual", run.CreatedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"), run.AccountAddress, run.Detail);
+                var identity = run.PartIds.Count != 0 ? $"Split batch ({run.PartIds.Count} parts)"
+                    : run.ParentBatchId is not null ? $"Part {run.PartNumber}/{run.PartCount}: {run.Status}" : run.Status.ToString();
+                var index = _history.Rows.Add(identity, run.OccurrenceUtc?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "Manual", run.CreatedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"), run.AccountAddress, run.Subject + ": " + run.Detail);
                 _history.Rows[index].Tag = run;
                 if (run.Id == selectedRun)
                     _history.Rows[index].Selected = true;
@@ -408,7 +410,7 @@ internal sealed partial class MainForm : Form
         foreach (var button in new[] { _edit, _pause, _remove, _runNow, _reconcile, _openFolder })
             button.Enabled = selected && !_busy;
         _pause.Text = selected && _folders.SelectedRows[0].Tag is FolderSubscription { Enabled: true } ? "&Pause on this computer" : "&Enable on this computer";
-        _confirmSent.Enabled = selected && _history.SelectedRows.Count > 0 && _history.SelectedRows[0].Tag is RunRecord { Status: RunStatus.Submitting or RunStatus.Queued or RunStatus.NeedsReview } && !_busy;
+        _confirmSent.Enabled = selected && _history.SelectedRows.Count > 0 && _history.SelectedRows[0].Tag is RunRecord { PartIds.Count: 0, Status: RunStatus.Submitting or RunStatus.Queued or RunStatus.NeedsReview or RunStatus.SizeBlocked } && !_busy;
     }
 
     private void SetBusy(bool busy, string? message = null)

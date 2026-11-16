@@ -49,7 +49,11 @@ public static class FolderStore
             || schedules.Children.Any(node => node is not YamlMappingNode schedule
                 || !schedule.Children.ContainsKey(new YamlScalarNode("id"))))
             throw new InvalidDataException("The YAML must explicitly include a stable folder id, active_from_utc, schedules, and an id for each schedule.");
-        var configuration = YamlReader.Deserialize<FolderConfiguration>(content)
+        mapping.Children.Remove(new YamlScalarNode("file_ready_seconds"));
+        mapping.Children.Remove(new YamlScalarNode("maximum_message_size_mb"));
+        using var migrated = new StringWriter();
+        yaml.Save(migrated, false);
+        var configuration = YamlReader.Deserialize<FolderConfiguration>(migrated.ToString())
             ?? throw new InvalidDataException("The folder configuration is empty.");
         ValidateConfiguration(root, configuration);
         return configuration;
@@ -65,6 +69,7 @@ public static class FolderStore
             var previous = LoadConfiguration(root);
             if (previous.Id != configuration.Id)
                 throw new InvalidDataException("The existing folder ID cannot be changed.");
+            configuration.SchemaVersion = Math.Max(configuration.SchemaVersion, previous.SchemaVersion);
             configuration.ActiveFromUtc = previous.ActiveFromUtc;
         }
         Directory.CreateDirectory(ResolveFolder(root, configuration.PendingFolder));
@@ -185,6 +190,14 @@ public static class FolderStore
                 continue;
             history.Add(LoadRun(root, batch.Name));
         }
+        foreach (var active in GetActiveRuns(root))
+        {
+            if (history.All(run => run.Id != active.Id))
+                history.Add(active);
+            foreach (var id in active.PartIds)
+                if (history.All(run => run.Id != id) && File.Exists(Path.Combine(directory, id, "batch.json")))
+                    history.Add(LoadRun(root, id));
+        }
         return history.OrderByDescending(run => run.CreatedUtc).ToList();
     }
 
@@ -207,7 +220,7 @@ public static class FolderStore
 
     internal static void ValidateConfiguration(string root, FolderConfiguration configuration)
     {
-        if (configuration.SchemaVersion != 1)
+        if (configuration.SchemaVersion is not (1 or 2))
             throw new InvalidDataException("This configuration version is not supported.");
         if (!Guid.TryParseExact(configuration.Id, "N", out _))
             throw new InvalidDataException("The folder ID is invalid.");
@@ -227,10 +240,6 @@ public static class FolderStore
         foreach (var image in configuration.InlineImages)
             _ = ResolveInlineImage(root, configuration, image);
         _ = ValidateInlineImageReferences(configuration.Body, configuration.BodyIsHtml, configuration.InlineImages.Select(image => image.Id));
-        if (configuration.FileReadySeconds < 0 || configuration.FileReadySeconds > 86400)
-            throw new InvalidDataException("The file readiness delay must be between 0 and 86400 seconds.");
-        if (configuration.MaximumMessageSizeMb is < 1 or > 150)
-            throw new InvalidDataException("The message size limit must be between 1 and 150 MB.");
         if (configuration.Schedules.Select(schedule => schedule.Id).Distinct().Count() != configuration.Schedules.Count)
             throw new InvalidDataException("Each schedule must have a unique ID.");
         foreach (var schedule in configuration.Schedules)
@@ -331,6 +340,7 @@ public static class FolderStore
         var run = progressDocument.Deserialize<RunRecord>(JsonOptions)
             ?? throw new InvalidDataException("An execution record is empty.");
         var mutable = run;
+        RunRecord manifest;
         using (var manifestStream = new FileStream(Path.Combine(directory, "batch.json"), FileMode.Open,
                    FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
         {
@@ -338,7 +348,7 @@ public static class FolderStore
             if (!manifestDocument.RootElement.TryGetProperty("transport", out var manifestTransport)
                 || manifestTransport.GetString() != CurrentTransport)
                 throw new InvalidDataException("This batch belongs to a previous mail connector. Review and finish it with the previous version before using this folder.");
-            var manifest = manifestDocument.Deserialize<RunRecord>(JsonOptions)
+            manifest = manifestDocument.Deserialize<RunRecord>(JsonOptions)
                 ?? throw new InvalidDataException("The batch manifest is empty.");
             if (manifest.Id != runId)
                 throw new InvalidDataException("The batch manifest has an invalid ID.");
@@ -385,9 +395,34 @@ public static class FolderStore
                 || authoritative.SubmissionAttempt < (expected is RunStatus.Queued or RunStatus.Sent or RunStatus.Archived or RunStatus.SkippedEmpty ? 0 : 1)
                 || authoritative.Status != expected)
                 throw new InvalidDataException("A submission marker is invalid. Review this batch before continuing.");
+            if (expected == RunStatus.Rejected && manifest.ParentBatchId is null
+                && mutable.Status is RunStatus.Preparing or RunStatus.DraftReady or RunStatus.SizeBlocked or RunStatus.NeedsReview
+                && mutable.SubmissionAttempt == authoritative.SubmissionAttempt)
+            {
+                authoritative.Subject = mutable.Subject;
+                authoritative.Body = mutable.Body;
+                authoritative.BodyIsHtml = mutable.BodyIsHtml;
+                authoritative.To = mutable.To;
+                authoritative.Cc = mutable.Cc;
+                authoritative.AccountId = mutable.AccountId;
+                authoritative.AccountAddress = mutable.AccountAddress;
+                authoritative.WorkerName = mutable.WorkerName;
+            }
             if (expected is RunStatus.Submitting or RunStatus.Queued && mutable.Status == RunStatus.NeedsReview
                 && mutable.AccountId == authoritative.AccountId && mutable.DraftId == authoritative.DraftId
                 && mutable.SubmissionAttempt == authoritative.SubmissionAttempt)
+            {
+                authoritative.Status = RunStatus.NeedsReview;
+                authoritative.Detail = mutable.Detail;
+            }
+            if (expected == RunStatus.Rejected && mutable.Status == RunStatus.SizeBlocked
+                && mutable.AccountId == authoritative.AccountId && mutable.SubmissionAttempt == authoritative.SubmissionAttempt)
+            {
+                authoritative.Status = RunStatus.SizeBlocked;
+                authoritative.Detail = mutable.Detail;
+            }
+            if (expected == RunStatus.Rejected && mutable.Status == RunStatus.NeedsReview
+                && mutable.AccountId == authoritative.AccountId && mutable.SubmissionAttempt == authoritative.SubmissionAttempt)
             {
                 authoritative.Status = RunStatus.NeedsReview;
                 authoritative.Detail = mutable.Detail;
@@ -400,7 +435,79 @@ public static class FolderStore
         }
         if (run.Id != runId)
             throw new InvalidDataException("An execution record has an invalid batch ID.");
+        if (manifest.ParentBatchId is not null)
+        {
+            if (!Guid.TryParseExact(manifest.ParentBatchId, "N", out _))
+                throw new InvalidDataException("A mail part has an invalid parent batch ID.");
+            run.ParentBatchId = manifest.ParentBatchId;
+            run.PartNumber = manifest.PartNumber;
+            run.PartCount = manifest.PartCount;
+            run.Subject = manifest.Subject;
+            run.Body = manifest.Body;
+            run.BodyIsHtml = manifest.BodyIsHtml;
+            run.To = manifest.To;
+            run.Cc = manifest.Cc;
+            run.Attachments = manifest.Attachments;
+            run.PendingFolder = manifest.PendingFolder;
+            run.SentFolder = manifest.SentFolder;
+            run.CoveredOccurrences = manifest.CoveredOccurrences;
+            if (run.AccountId != manifest.AccountId)
+                throw new InvalidDataException("A mail part's sending account differs from its frozen manifest.");
+        }
+        if (File.Exists(Path.Combine(directory, "split.json")))
+        {
+            var plan = LoadSplitPlan(root, runId);
+            if (run.Status is RunStatus.Queued or RunStatus.Sent)
+                throw new InvalidDataException("A partitioned batch also has an original submitted message. Review its records.");
+            if (run.Status != RunStatus.Archived)
+            {
+                run = plan.Parent;
+                if (mutable.Status == RunStatus.Split)
+                {
+                    run.Detail = mutable.Detail;
+                    run.UpdatedUtc = mutable.UpdatedUtc;
+                }
+            }
+            run.PartIds = plan.Parts.Select(part => part.Id).ToList();
+        }
         return run;
+    }
+
+    internal static SplitBatchPlan LoadSplitPlan(string root, string runId)
+    {
+        using var stream = new FileStream(Path.Combine(root, MetadataFolder, "runs", runId, "split.json"), FileMode.Open,
+            FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        var plan = JsonSerializer.Deserialize<SplitBatchPlan>(stream, JsonOptions)
+            ?? throw new InvalidDataException("The mail partition plan is empty.");
+        if (plan.Parent.Id != runId || plan.Parent.Status != RunStatus.Split || plan.Parts.Count < 2
+            || plan.Parts.Select(part => part.Id).Distinct().Count() != plan.Parts.Count
+            || plan.Parts.Any(part => !Guid.TryParseExact(part.Id, "N", out _) || part.ParentBatchId != runId
+                || part.CoveredOccurrences.Count != 0 || part.PartCount != plan.Parts.Count
+                || part.AccountId != plan.Parent.AccountId || !part.To.SequenceEqual(plan.Parent.To) || !part.Cc.SequenceEqual(plan.Parent.Cc))
+            || !plan.Parts.Select(part => part.PartNumber).Order().SequenceEqual(Enumerable.Range(1, plan.Parts.Count)))
+            throw new InvalidDataException("The mail partition plan has invalid ownership or delivery identities.");
+        var originalFiles = plan.Parent.Attachments.Where(attachment => attachment.ContentId is null).Select(attachment => (attachment.Name, attachment.Sha256)).OrderBy(file => file.Name).ToArray();
+        var partFiles = plan.Parts.SelectMany(part => part.Attachments).Where(attachment => attachment.ContentId is null).Select(attachment => (attachment.Name, attachment.Sha256)).OrderBy(file => file.Name).ToArray();
+        if (!originalFiles.SequenceEqual(partFiles))
+            throw new InvalidDataException("The mail partition plan does not contain each original document exactly once.");
+        return plan;
+    }
+
+    internal static void EnableMultipart(string root, FolderConfiguration configuration)
+    {
+        if (configuration.SchemaVersion == 2)
+            return;
+        configuration.SchemaVersion = 2;
+        WriteDurableFile(Path.Combine(root, "config.yml"), YamlWriter.Serialize(configuration));
+    }
+
+    internal static void PublishSplitPlan(string root, SplitBatchPlan plan)
+    {
+        plan.Parent.Status = RunStatus.Split;
+        plan.Parent.PartIds = plan.Parts.Select(part => part.Id).ToList();
+        plan.Parent.Detail = $"This batch contains {plan.Parts.Count} separate emails. Each part has its own sending record.";
+        WriteDurableFile(Path.Combine(root, MetadataFolder, "runs", plan.Parent.Id, "split.json"), JsonSerializer.Serialize(plan, JsonOptions), false);
+        SaveRun(root, plan.Parent);
     }
 
     internal static IReadOnlyList<RunRecord> GetActiveRuns(string root)
@@ -492,6 +599,8 @@ public static class FolderStore
         var directory = Path.Combine(root, MetadataFolder, "runs", run.Id);
         if (!File.Exists(Path.Combine(directory, "batch.json")))
             throw new InvalidDataException("The batch manifest is missing. Restore it before continuing.");
+        if (File.Exists(Path.Combine(directory, "split.json")) && run.Status is not (RunStatus.Split or RunStatus.Archived))
+            throw new InvalidOperationException("A partitioned batch cannot submit the original message again.");
         if (Directory.EnumerateFiles(directory, "submission-*.json").Any()
             || File.Exists(Path.Combine(directory, "queued.json"))
             || File.Exists(Path.Combine(directory, "sent.json"))
@@ -499,7 +608,7 @@ public static class FolderStore
             || File.Exists(Path.Combine(directory, "skipped.json")))
         {
             var authoritative = LoadRun(root, run.Id);
-            var canPrepareAgain = authoritative.Status == RunStatus.Rejected
+            var canPrepareAgain = authoritative.Status is RunStatus.Rejected or RunStatus.SizeBlocked
                 && run.SubmissionAttempt == authoritative.SubmissionAttempt;
             if (!canPrepareAgain && (run.Status is RunStatus.Preparing or RunStatus.DraftReady
                 || run.SubmissionAttempt != authoritative.SubmissionAttempt
@@ -513,7 +622,9 @@ public static class FolderStore
 
     internal static bool TryBeginSubmission(string root, RunRecord run)
     {
-        if (File.Exists(Path.Combine(root, MetadataFolder, "runs", run.Id, "queued.json"))
+        if (File.Exists(Path.Combine(root, MetadataFolder, "runs", run.Id, "split.json"))
+            || Directory.EnumerateFiles(Path.Combine(root, MetadataFolder, "runs", run.Id), "preflight-*.json").Any()
+            || File.Exists(Path.Combine(root, MetadataFolder, "runs", run.Id, "queued.json"))
             || File.Exists(Path.Combine(root, MetadataFolder, "runs", run.Id, "sent.json"))
             || File.Exists(Path.Combine(root, MetadataFolder, "runs", run.Id, "skipped.json")))
             return false;
@@ -599,7 +710,7 @@ public static class FolderStore
 
 public sealed class FolderBusyException(string message, Exception? innerException = null) : IOException(message, innerException);
 
-public enum RunStatus { Preparing, DraftReady, Submitting, Queued, Sent, Archived, SkippedEmpty, NeedsReview, Rejected }
+public enum RunStatus { Preparing, DraftReady, Submitting, Queued, Sent, Archived, SkippedEmpty, NeedsReview, Rejected, Split, SizeBlocked }
 
 public sealed class RunRecord
 {
@@ -617,6 +728,10 @@ public sealed class RunRecord
     public string WorkerName { get; set; } = "";
     public string DraftId { get; set; } = "";
     public int SubmissionAttempt { get; set; }
+    public string? ParentBatchId { get; set; }
+    public int PartNumber { get; set; }
+    public int PartCount { get; set; }
+    public List<string> PartIds { get; set; } = [];
     public string PendingFolder { get; set; } = "";
     public string SentFolder { get; set; } = "";
     public string Subject { get; set; } = "";
@@ -625,6 +740,12 @@ public sealed class RunRecord
     public List<string> To { get; set; } = [];
     public List<string> Cc { get; set; } = [];
     public List<RunAttachment> Attachments { get; set; } = [];
+}
+
+internal sealed class SplitBatchPlan
+{
+    public RunRecord Parent { get; set; } = new();
+    public List<RunRecord> Parts { get; set; } = [];
 }
 
 public sealed class RunAttachment

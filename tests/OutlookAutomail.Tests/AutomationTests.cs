@@ -202,39 +202,61 @@ public sealed class AutomationTests
     }
 
     [Fact]
-    public async Task OversizedBatchIsRejectedBeforeFilesAreClaimedOrDraftIsCreated()
+    public async Task BatchLargerThanTheFormerMessageLimitIsSentAndArchived()
     {
         using var folder = new TestFolder();
-        folder.Configuration.MaximumMessageSizeMb = 1;
-        folder.Save();
         var file = Path.Combine(folder.Root, "To send", "document.pdf");
-        File.WriteAllBytes(file, new byte[800_000]);
+        const long length = 26L * 1024 * 1024;
+        using (var stream = new FileStream(file, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            stream.SetLength(length);
         var mail = new FakeMail();
-        await Assert.ThrowsAsync<InvalidDataException>(() => folder.Engine(mail).RunNowAsync(folder.Root, default));
-        Assert.Equal(0, mail.CreateCount);
-        Assert.True(File.Exists(file));
-        Assert.Empty(FolderStore.GetHistory(folder.Root));
+
+        await folder.Engine(mail).RunNowAsync(folder.Root, default);
+
+        Assert.Equal(1, mail.CreateCount);
+        Assert.Equal(1, mail.SendCount);
+        Assert.Equal(length, Assert.Single(mail.LastMessage!.Attachments).Length);
+        Assert.False(File.Exists(file));
+        Assert.Equal(RunStatus.Archived, Assert.Single(FolderStore.GetHistory(folder.Root)).Status);
+        var archived = Assert.Single(Directory.GetFiles(Path.Combine(folder.Root, "Sent"), "document.pdf", SearchOption.AllDirectories));
+        Assert.Equal(length, new FileInfo(archived).Length);
     }
 
     [Fact]
-    public async Task OpenOrRecentlyChangedFileDefersTheWholeBatch()
+    public async Task OpenFileDefersTheWholeBatchUntilItIsClosed()
     {
         using var folder = new TestFolder();
         folder.AddFile("document.pdf", "document");
+        folder.AddFile("other.pdf", "other document");
         var mail = new FakeMail();
         var engine = folder.Engine(mail);
         using (var writing = new FileStream(Path.Combine(folder.Root, "To send", "document.pdf"), FileMode.Open, FileAccess.Write, FileShare.None))
             await engine.RunNowAsync(folder.Root, default);
         Assert.Equal(0, mail.CreateCount);
         Assert.Empty(FolderStore.GetHistory(folder.Root));
-        folder.Configuration.FileReadySeconds = 30;
-        folder.Save();
+        Assert.Equal(2, Directory.GetFiles(Path.Combine(folder.Root, "To send")).Length);
         File.SetLastWriteTimeUtc(Path.Combine(folder.Root, "To send", "document.pdf"), folder.Clock.GetUtcNow().UtcDateTime);
+
         await engine.RunNowAsync(folder.Root, default);
-        Assert.Equal(0, mail.SendCount);
-        folder.Clock.Advance(TimeSpan.FromSeconds(31));
-        await engine.RunNowAsync(folder.Root, default);
+
         Assert.Equal(1, mail.SendCount);
+        Assert.Equal(2, mail.LastMessage!.Attachments.Count);
+        Assert.Equal(RunStatus.Archived, Assert.Single(FolderStore.GetHistory(folder.Root)).Status);
+    }
+
+    [Fact]
+    public async Task NewlyFinishedUnlockedDocumentIsSentWithoutWaiting()
+    {
+        using var folder = new TestFolder();
+        File.AppendAllText(Path.Combine(folder.Root, "config.yml"), "file_ready_seconds: 3600\n");
+        folder.AddFile("document.pdf", "document");
+        File.SetLastWriteTimeUtc(Path.Combine(folder.Root, "To send", "document.pdf"), folder.Clock.GetUtcNow().UtcDateTime);
+        var mail = new FakeMail();
+
+        await folder.Engine(mail).RunNowAsync(folder.Root, default);
+
+        Assert.Equal(1, mail.SendCount);
+        Assert.Equal(RunStatus.Archived, Assert.Single(FolderStore.GetHistory(folder.Root)).Status);
     }
 
     [Fact]
@@ -675,34 +697,38 @@ public sealed class AutomationTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task ExpandedMessageFieldExceedingTheLimitIsRejectedBeforeClaimingFiles(bool subject)
+    public async Task LargeExpandedMessageFieldsAreSentDespiteARetiredSizeSetting(bool subject)
     {
         using var folder = new TestFolder();
-        folder.Configuration.MaximumMessageSizeMb = 1;
-        var template = string.Concat(Enumerable.Repeat("{date}", subject ? 110_000 : 55_000));
+        var count = subject ? 110_000 : 55_000;
+        var template = string.Concat(Enumerable.Repeat("{date}", count));
         if (subject)
             folder.Configuration.Subject = template;
         else
             folder.Configuration.Body = template;
         folder.Save();
+        File.AppendAllText(Path.Combine(folder.Root, "config.yml"), "maximum_message_size_mb: 1\n");
         folder.AddFile("document.pdf", "document");
         var mail = new FakeMail();
 
-        await Assert.ThrowsAsync<InvalidDataException>(() => folder.Engine(mail).RunNowAsync(folder.Root, default));
+        await folder.Engine(mail).RunNowAsync(folder.Root, default);
 
-        Assert.Equal(0, mail.CreateCount);
-        Assert.Equal(0, mail.SendCount);
-        Assert.True(File.Exists(Path.Combine(folder.Root, "To send", "document.pdf")));
-        Assert.Empty(FolderStore.GetHistory(folder.Root));
+        Assert.Equal(1, mail.CreateCount);
+        Assert.Equal(1, mail.SendCount);
+        var expected = string.Concat(Enumerable.Repeat("03/01/2030", count));
+        Assert.Equal(expected, subject ? mail.LastMessage!.Subject : mail.LastMessage!.Body);
+        Assert.False(File.Exists(Path.Combine(folder.Root, "To send", "document.pdf")));
+        var run = Assert.Single(FolderStore.GetHistory(folder.Root));
+        Assert.Equal(expected, subject ? run.Subject : run.Body);
+        Assert.Equal(RunStatus.Archived, run.Status);
     }
 
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task OversizedExpandedRetryPreservesTheExistingDraftAndSubmissionHistory(bool subject)
+    public async Task LargeExpandedRejectedRetrySendsEditedFieldsAndPreservesSubmissionHistory(bool subject)
     {
         using var folder = new TestFolder();
-        folder.Configuration.MaximumMessageSizeMb = 1;
         folder.Configuration.Subject = "Original subject {date}";
         folder.Configuration.Body = "Original {date}";
         folder.Save();
@@ -710,24 +736,68 @@ public sealed class AutomationTests
         var mail = new FakeMail { SendError = new MailSubmissionRejectedException("UnresolvedRecipients", "Recipient correction required.") };
         var engine = folder.Engine(mail);
         await Assert.ThrowsAsync<MailSubmissionRejectedException>(() => engine.RunNowAsync(folder.Root, default));
-        var template = string.Concat(Enumerable.Repeat("{date}", subject ? 110_000 : 55_000));
+        var rejected = Assert.Single(FolderStore.GetHistory(folder.Root));
+        var runDirectory = Path.Combine(folder.Root, ".automail", "runs", rejected.Id);
+        var originalSubmission = Assert.Single(Directory.GetFiles(runDirectory, "submission-*.json"));
+        var originalRejection = Assert.Single(Directory.GetFiles(runDirectory, "rejected-*.json"));
+        var submissionRecord = File.ReadAllText(originalSubmission);
+        var rejectionRecord = File.ReadAllText(originalRejection);
+        folder.Clock.Advance(TimeSpan.FromDays(2));
+        var count = subject ? 110_000 : 55_000;
+        var template = string.Concat(Enumerable.Repeat("{date}", count));
         if (subject)
             folder.Configuration.Subject = template;
         else
             folder.Configuration.Body = template;
         folder.Save();
+        File.AppendAllText(Path.Combine(folder.Root, "config.yml"), "maximum_message_size_mb: 1\n");
         mail.SendError = null;
 
-        await Assert.ThrowsAsync<InvalidDataException>(() => engine.RunNowAsync(folder.Root, default));
+        await engine.RunNowAsync(folder.Root, default);
 
-        Assert.Equal(0, mail.DeleteCount);
-        Assert.Equal(1, mail.CreateCount);
-        Assert.Equal(1, mail.SendCount);
+        Assert.Equal(1, mail.DeleteCount);
+        Assert.Equal(2, mail.CreateCount);
+        Assert.Equal(2, mail.SendCount);
+        var expected = string.Concat(Enumerable.Repeat("03/01/2030", count));
+        Assert.Equal(expected, subject ? mail.LastMessage!.Subject : mail.LastMessage!.Body);
         var run = Assert.Single(FolderStore.GetHistory(folder.Root));
-        Assert.Equal(RunStatus.Rejected, run.Status);
-        Assert.Equal("Original subject 03/01/2030", run.Subject);
-        Assert.Equal("Original 03/01/2030", run.Body);
-        Assert.Equal(1, run.SubmissionAttempt);
+        Assert.Equal(RunStatus.Archived, run.Status);
+        Assert.Equal(expected, subject ? run.Subject : run.Body);
+        Assert.Equal(subject ? "Original 03/01/2030" : "Original subject 03/01/2030", subject ? run.Body : run.Subject);
+        Assert.Equal(rejected.CreatedUtc, run.CreatedUtc);
+        Assert.Equal(2, run.SubmissionAttempt);
+        Assert.Equal(2, Directory.GetFiles(runDirectory, "submission-*.json").Length);
+        Assert.Equal(submissionRecord, File.ReadAllText(originalSubmission));
+        Assert.Equal(rejectionRecord, File.ReadAllText(originalRejection));
+    }
+
+    [Fact]
+    public void RetiredConfigurationKeysLoadAndAreRemovedWhenSaved()
+    {
+        using var folder = new TestFolder();
+        var path = Path.Combine(folder.Root, "config.yml");
+        File.AppendAllText(path, "file_ready_seconds: 3600\nmaximum_message_size_mb: 1\n");
+
+        var loaded = FolderStore.LoadConfiguration(folder.Root);
+        FolderStore.SaveConfiguration(folder.Root, loaded);
+
+        Assert.Equal(folder.Configuration.Id, loaded.Id);
+        Assert.Equal(folder.Configuration.Schedules[0].Id, Assert.Single(loaded.Schedules).Id);
+        var yaml = new YamlDotNet.RepresentationModel.YamlStream();
+        yaml.Load(new StringReader(File.ReadAllText(path)));
+        var mapping = (YamlDotNet.RepresentationModel.YamlMappingNode)yaml.Documents[0].RootNode;
+        Assert.False(mapping.Children.ContainsKey(new YamlDotNet.RepresentationModel.YamlScalarNode("file_ready_seconds")));
+        Assert.False(mapping.Children.ContainsKey(new YamlDotNet.RepresentationModel.YamlScalarNode("maximum_message_size_mb")));
+        Assert.Equal(loaded.Id, FolderStore.LoadConfiguration(folder.Root).Id);
+    }
+
+    [Fact]
+    public void UnknownConfigurationKeysAreStillRejected()
+    {
+        using var folder = new TestFolder();
+        File.AppendAllText(Path.Combine(folder.Root, "config.yml"), "maximum_message_size_mbb: 25\n");
+
+        Assert.Throws<YamlDotNet.Core.YamlException>(() => FolderStore.LoadConfiguration(folder.Root));
     }
 
     [Theory]
@@ -796,7 +866,6 @@ internal sealed class TestFolder : IDisposable
         Configuration = new FolderConfiguration
         {
             To = ["recipient@example.com"],
-            FileReadySeconds = 0,
             ActiveFromUtc = Clock.GetUtcNow().AddDays(-3),
             Schedules = [new ScheduleConfiguration { Time = "06:00", TimeZoneId = "UTC" }]
         };

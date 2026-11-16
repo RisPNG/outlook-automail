@@ -33,8 +33,6 @@ public sealed class FolderConfiguration
     public string DateTimeZoneId { get; set; } = "UTC";
     public bool SendWhenEmpty { get; set; }
     public bool WaitForFiles { get; set; }
-    public int FileReadySeconds { get; set; } = 30;
-    public int MaximumMessageSizeMb { get; set; } = 25;
     public List<ScheduleConfiguration> Schedules { get; set; } = [new()];
 }
 
@@ -55,12 +53,27 @@ public sealed class ScheduleConfiguration
 
 public sealed record MailAccount(string Id, string Address, string DisplayName);
 public sealed record MailAttachment(string Name, string Path, long Length, string? ContentId = null, string? ContentType = null);
-public sealed record MailMessage(string BatchId, string Subject, string Body, bool IsHtml, IReadOnlyList<string> To, IReadOnlyList<string> Cc, IReadOnlyList<MailAttachment> Attachments);
+public sealed record MailMessage(string BatchId, string Subject, string Body, bool IsHtml, IReadOnlyList<string> To, IReadOnlyList<string> Cc, IReadOnlyList<MailAttachment> Attachments)
+{
+    public long EstimatedEncodedBytes => 8192 + System.Text.Encoding.UTF8.GetByteCount(Subject) * 2L
+        + System.Text.Encoding.UTF8.GetByteCount(Body) * 2L
+        + To.Concat(Cc).Sum(address => System.Text.Encoding.UTF8.GetByteCount(address) + 128L)
+        + Attachments.Sum(attachment => ((attachment.Length + 2) / 3) * 4
+            + ((((attachment.Length + 2) / 3) * 4 + 75) / 76) * 2 + 2048);
+}
 public enum MailSubmissionStatus { Draft, Queued, Sent, Missing }
 
-public sealed class MailSubmissionRejectedException(string errorCode, string message) : InvalidOperationException(message)
+public class MailSubmissionRejectedException(string errorCode, string message) : InvalidOperationException(message)
 {
     public string ErrorCode { get; } = errorCode;
+}
+
+public sealed class MailSizeLimitException(long? maximumMessageBytes, string evidence, string stage)
+    : MailSubmissionRejectedException("MessageTooLarge", $"The message exceeds an Outlook size limit during {stage}. {evidence}")
+{
+    public long? MaximumMessageBytes { get; } = maximumMessageBytes;
+    public string Evidence { get; } = evidence;
+    public string Stage { get; } = stage;
 }
 
 public interface IMailClient

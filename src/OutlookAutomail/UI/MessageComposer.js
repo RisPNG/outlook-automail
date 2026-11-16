@@ -12,7 +12,6 @@ const dateExpressionPattern = /\{\{date(?::[^{}\r\n]+)?\}\}|\{date(?::[^{}\r\n]+
 let images = new Map();
 let savedSelection = null;
 let pendingFontSize = null;
-let maximumImageBytes = 0;
 let changeTimer = null;
 let lastPreviewHtml = null;
 
@@ -237,13 +236,6 @@ function reportSelectionFormat() {
 
 async function importClipboardImages(files) {
     for (const file of files) {
-        if (file.size > maximumImageBytes) {
-            const message = "The photo exceeds the message size limit.";
-            notice.textContent = message;
-            notice.hidden = false;
-            window.chrome.webview.postMessage({ type: "notice", message });
-            continue;
-        }
         if (!/^image\/(?:png|jpeg|gif|bmp)$/i.test(file.type)) {
             reportBlockedContent();
             continue;
@@ -262,7 +254,6 @@ window.composer = {
     load(data) {
         clearTimeout(changeTimer);
         pendingFontSize = null;
-        maximumImageBytes = Math.max(0, Number(data.maxImageBytes) || 0);
         lastPreviewHtml = null;
         images = new Map(data.images.filter(image => {
             const url = new URL(image.url, location.origin);
@@ -287,8 +278,6 @@ window.composer = {
     },
 
     preview(data) {
-        if (data.maxImageBytes !== undefined)
-            maximumImageBytes = Math.max(0, Number(data.maxImageBytes) || 0);
         if (data.images) {
             images = new Map(data.images.filter(image => {
                 const url = new URL(image.url, location.origin);

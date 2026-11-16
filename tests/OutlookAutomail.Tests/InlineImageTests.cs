@@ -187,43 +187,81 @@ public sealed class InlineImageTests
     }
 
     [Fact]
-    public async Task PhotoEncodingCountsTowardTheMessageLimitBeforeAnyBatchIsPublished()
+    public async Task LargePhotoCanBeImportedFrozenAndSentDespiteARetiredSizeSetting()
     {
         using var folder = new TestFolder();
-        AddPhoto(folder, [.. Photo, .. new byte[800_000]]);
-        folder.Configuration.MaximumMessageSizeMb = 1;
+        var source = Path.Combine(folder.Root, "photo.png");
+        const long length = 26L * 1024 * 1024;
+        using (var stream = new FileStream(source, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            stream.Write(Photo);
+            stream.SetLength(length);
+        }
+        InlineImageConfiguration image;
+        using (var stream = File.OpenRead(source))
+            image = FolderStore.ImportInlineImage(folder.Root, folder.Configuration, stream);
+        folder.Configuration.InlineImages.Add(image);
+        folder.Configuration.BodyIsHtml = true;
+        folder.Configuration.Body = $"<p>Documents attached.</p><img src=\"cid:{image.Id}\">";
         folder.Save();
+        File.AppendAllText(Path.Combine(folder.Root, "config.yml"), "maximum_message_size_mb: 1\n");
         folder.AddFile("document.pdf", "document");
         var mail = new FakeMail();
 
-        await Assert.ThrowsAsync<InvalidDataException>(() => folder.Engine(mail).RunNowAsync(folder.Root, default));
+        await folder.Engine(mail).RunNowAsync(folder.Root, default);
 
-        Assert.Equal(0, mail.CreateCount);
-        Assert.Equal(0, mail.SendCount);
-        Assert.Empty(FolderStore.GetHistory(folder.Root));
-        Assert.True(File.Exists(Path.Combine(folder.Root, "To send", "document.pdf")));
+        Assert.Equal(1, mail.CreateCount);
+        Assert.Equal(1, mail.SendCount);
+        var attachment = Assert.Single(mail.LastMessage!.Attachments, attachment => attachment.ContentId is not null);
+        Assert.Equal(image.Id, attachment.ContentId);
+        Assert.Equal(length, attachment.Length);
+        Assert.Equal("image/png", attachment.ContentType);
+        Assert.Equal(length, new FileInfo(FolderStore.ResolveInlineImage(folder.Root, folder.Configuration, image)).Length);
+        Assert.Equal(RunStatus.Archived, Assert.Single(FolderStore.GetHistory(folder.Root)).Status);
+        Assert.False(File.Exists(Path.Combine(folder.Root, "To send", "document.pdf")));
     }
 
     [Fact]
-    public async Task PhotoReadinessDelayLeavesDocumentsUnclaimed()
+    public async Task NewlyFinishedUnlockedPhotoIsSentWithDocumentsWithoutWaiting()
     {
         using var folder = new TestFolder();
         var image = AddPhoto(folder);
-        folder.Configuration.FileReadySeconds = 30;
         folder.Save();
+        File.AppendAllText(Path.Combine(folder.Root, "config.yml"), "file_ready_seconds: 3600\n");
         folder.AddFile("document.pdf", "document");
         File.SetLastWriteTimeUtc(FolderStore.ResolveInlineImage(folder.Root, folder.Configuration, image), folder.Clock.GetUtcNow().UtcDateTime);
         var mail = new FakeMail();
+
+        await folder.Engine(mail).RunNowAsync(folder.Root, default);
+
+        Assert.Equal(1, mail.CreateCount);
+        Assert.Equal(1, mail.SendCount);
+        Assert.Equal(2, mail.LastMessage!.Attachments.Count);
+        Assert.Equal(image.Id, Assert.Single(mail.LastMessage.Attachments, attachment => attachment.ContentId is not null).ContentId);
+        Assert.Equal(RunStatus.Archived, Assert.Single(FolderStore.GetHistory(folder.Root)).Status);
+        Assert.False(File.Exists(Path.Combine(folder.Root, "To send", "document.pdf")));
+    }
+
+    [Fact]
+    public async Task LockedPhotoLeavesDocumentsUnclaimedUntilItIsClosed()
+    {
+        using var folder = new TestFolder();
+        var image = AddPhoto(folder);
+        folder.Save();
+        folder.AddFile("document.pdf", "document");
+        var path = FolderStore.ResolveInlineImage(folder.Root, folder.Configuration, image);
+        var mail = new FakeMail();
         var engine = folder.Engine(mail);
 
-        await engine.RunNowAsync(folder.Root, default);
+        using (var writing = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None))
+            await engine.RunNowAsync(folder.Root, default);
 
         Assert.Equal(0, mail.CreateCount);
         Assert.Empty(FolderStore.GetHistory(folder.Root));
         Assert.True(File.Exists(Path.Combine(folder.Root, "To send", "document.pdf")));
-        folder.Clock.Advance(TimeSpan.FromSeconds(31));
         await engine.RunNowAsync(folder.Root, default);
         Assert.Equal(1, mail.SendCount);
+        Assert.Equal(RunStatus.Archived, Assert.Single(FolderStore.GetHistory(folder.Root)).Status);
     }
 
     [Theory]

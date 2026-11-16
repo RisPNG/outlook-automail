@@ -21,6 +21,8 @@
   </ItemGroup>
   <ItemGroup>
     <Content Include="../../README.md" Link="README.md" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="../../dev/README.md" Link="dev/README.md" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Assets/AppIcon.png" Link="src/OutlookAutomail/Assets/AppIcon.png" CopyToPublishDirectory="PreserveNewest" />
     <InternalsVisibleTo Include="OutlookAutomail.Tests" />
     <EmbeddedResource Include="UI/MessageComposer.html;UI/MessageComposer.css;UI/MessageComposer.js" />
   </ItemGroup>

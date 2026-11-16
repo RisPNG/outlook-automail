@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.ComponentModel;
 using System.Globalization;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
@@ -28,8 +27,6 @@ internal sealed class MessageComposer : UserControl
     public bool IsReady { get; private set; }
     public bool IsLoading => _initialization is not null && !_initialization.IsCompleted;
     public bool CanSave => _initialization is null || IsReady;
-    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public long MaximumImageBytes { get; set; } = 25 * 1024 * 1024;
     public event Action? BodyChanged;
     public event Action<string>? Notice;
     public event Action<byte[]>? ImagePasted;
@@ -200,10 +197,7 @@ internal sealed class MessageComposer : UserControl
                         break;
                     case "image":
                         var encoded = value.GetProperty("base64").GetString()!;
-                        if (encoded.Length > (MaximumImageBytes + 2) / 3 * 4)
-                            Notice?.Invoke("The photo exceeds the configured message size limit.");
-                        else
-                            ImagePasted?.Invoke(Convert.FromBase64String(encoded));
+                        ImagePasted?.Invoke(Convert.FromBase64String(encoded));
                         break;
                 }
             };
@@ -216,8 +210,7 @@ internal sealed class MessageComposer : UserControl
                 html = MessageTemplate.PrepareBodyForEditor(Body, BodyIsHtml),
                 images = _images.Select(image => new { id = image.Key, url = Origin + "/images/" + Uri.EscapeDataString(image.Key) }),
                 subject = _previewSubject,
-                previewHtml = _previewHtml,
-                maxImageBytes = MaximumImageBytes
+                previewHtml = _previewHtml
             }) + ")");
             Body = MessageTemplate.ReadBodyFromEditor(JsonSerializer.Deserialize<string>(result)!);
             BodyIsHtml = true;
@@ -266,8 +259,6 @@ internal sealed class MessageComposer : UserControl
                     {
                         using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
                         var type = FolderStore.ValidateInlineImage(file);
-                        if (file.Length > MaximumImageBytes)
-                            throw new InvalidDataException("A photo exceeds the configured message size limit.");
                         file.Position = 0;
                         var copy = new MemoryStream();
                         file.CopyTo(copy);
@@ -310,7 +301,6 @@ internal sealed class MessageComposer : UserControl
                 {
                     subject,
                     html,
-                    maxImageBytes = MaximumImageBytes,
                     images = _images.Select(image => new { id = image.Key, url = Origin + "/images/" + Uri.EscapeDataString(image.Key) })
                 }) + ")");
             }

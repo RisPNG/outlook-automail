@@ -33,9 +33,6 @@ internal sealed partial class FolderConfigurationForm : Form
         _dateTimeZone.SelectedItem = configuration.DateTimeZoneId;
         _sendEmpty.Checked = configuration.SendWhenEmpty;
         _waitForFiles.Checked = configuration.WaitForFiles;
-        _readySeconds.Value = configuration.FileReadySeconds;
-        _maximumMb.Value = configuration.MaximumMessageSizeMb;
-        _body.MaximumImageBytes = configuration.MaximumMessageSizeMb * 1024L * 1024;
         foreach (var image in _inlineImages)
         {
             var index = _photos.Rows.Add(image.Path);
@@ -71,7 +68,6 @@ internal sealed partial class FolderConfigurationForm : Form
         _body.ImagePasted += async bytes => await ImportPhotoAsync(null, bytes);
         _dateFormat.TextChanged += (_, _) => RefreshMessagePreview();
         _dateTimeZone.SelectedIndexChanged += (_, _) => RefreshMessagePreview();
-        _maximumMb.ValueChanged += (_, _) => _body.MaximumImageBytes = (long)_maximumMb.Value * 1024 * 1024;
         Activated += (_, _) => RefreshMessagePreview();
         _editorTabs.SelectedIndexChanged += async (_, _) =>
         {
@@ -171,8 +167,6 @@ internal sealed partial class FolderConfigurationForm : Form
                     DateTimeZoneId = Convert.ToString(_dateTimeZone.SelectedItem) ?? "",
                     SendWhenEmpty = _sendEmpty.Checked,
                     WaitForFiles = _waitForFiles.Checked && !_sendEmpty.Checked,
-                    FileReadySeconds = (int)_readySeconds.Value,
-                    MaximumMessageSizeMb = (int)_maximumMb.Value,
                     Schedules = schedules
                 };
                 await Task.Run(() => FolderStore.SaveConfiguration(_root, updated));
@@ -207,12 +201,9 @@ internal sealed partial class FolderConfigurationForm : Form
         try
         {
             var draft = new FolderConfiguration { PendingFolder = _pending.Text.Trim(), SentFolder = _sent.Text.Trim() };
-            var limit = _body.MaximumImageBytes;
             var image = await Task.Run(() =>
             {
                 using Stream source = path is null ? new MemoryStream(bytes!, false) : new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-                if (source.Length > limit)
-                    throw new InvalidDataException("The photo exceeds the configured message size limit.");
                 return FolderStore.ImportInlineImage(_root, draft, source);
             });
             _inlineImages.Add(image);

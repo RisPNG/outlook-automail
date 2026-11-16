@@ -84,9 +84,24 @@ internal sealed class OutlookComSession : IOutlookSessionBridge
         object? properties = null;
         object? recipients = null;
         object? sentFolder = null;
+        object? store = null;
+        object? storeProperties = null;
         try
         {
             account = FindAccount(accountId);
+            long maximumBytes = 0;
+            try
+            {
+                store = ((dynamic)account).DeliveryStore;
+                if (store is not null)
+                {
+                    storeProperties = ((dynamic)store).PropertyAccessor;
+                    maximumBytes = Convert.ToInt64(((dynamic)storeProperties).GetProperty("http://schemas.microsoft.com/mapi/proptag/0x666D0003")) * 1024L;
+                }
+            }
+            catch (COMException) { }
+            if (maximumBytes > 0 && message.EstimatedEncodedBytes > maximumBytes)
+                throw new MailSizeLimitException(maximumBytes, $"The selected Outlook store reports a maximum submission size of {maximumBytes} bytes (0x666D0003, kilobytes converted to bytes). No Send call started.", "draft preflight");
             folder = OpenAccountFolder(accountId, 16);
             sentFolder = OpenAccountFolder(accountId, 5);
             items = ((dynamic)folder!).Items;
@@ -129,6 +144,8 @@ internal sealed class OutlookComSession : IOutlookSessionBridge
         }
         finally
         {
+            if (storeProperties is not null) Marshal.ReleaseComObject(storeProperties);
+            if (store is not null) Marshal.ReleaseComObject(store);
             if (sentFolder is not null) Marshal.ReleaseComObject(sentFolder);
             if (recipients is not null) Marshal.ReleaseComObject(recipients);
             if (properties is not null) Marshal.ReleaseComObject(properties);
@@ -159,17 +176,29 @@ internal sealed class OutlookComSession : IOutlookSessionBridge
                 object? properties = null;
                 try
                 {
-                    added = ((dynamic)collection).Add(attachment.Path, 1, Type.Missing, attachment.Name);
+                    try { added = ((dynamic)collection).Add(attachment.Path, 1, Type.Missing, attachment.Name); }
+                    catch (COMException exception) when (exception.HResult is unchecked((int)0x80040305) or unchecked((int)0x800700DF))
+                    {
+                        throw new MailSizeLimitException(null, $"Outlook rejected attachment '{attachment.Name}' while adding files (0x{exception.HResult:X8}). No Send call started.", "attachment preparation");
+                    }
                     if (attachment.ContentId is not null)
                     {
                         if (attachment.ContentType is not ("image/png" or "image/jpeg" or "image/gif" or "image/bmp"))
                             throw new InvalidDataException("An embedded photo has an unsupported content type.");
                         properties = ((dynamic)added).PropertyAccessor;
-                        ((dynamic)properties).SetProperty("http://schemas.microsoft.com/mapi/proptag/0x3712001F", attachment.ContentId);
-                        ((dynamic)properties).SetProperty("http://schemas.microsoft.com/mapi/proptag/0x370E001F", attachment.ContentType);
-                        ((dynamic)properties).SetProperty("http://schemas.microsoft.com/mapi/proptag/0x7FFE000B", true);
-                        ((dynamic)properties).SetProperty("http://schemas.microsoft.com/mapi/proptag/0x37140003", 4);
-                        ((dynamic)properties).SetProperty("http://schemas.microsoft.com/mapi/proptag/0x370B0003", -1);
+                        foreach (var (schema, value) in new (string Schema, object Value)[]
+                        {
+                            ("http://schemas.microsoft.com/mapi/proptag/0x3712001F", attachment.ContentId),
+                            ("http://schemas.microsoft.com/mapi/proptag/0x370E001F", attachment.ContentType),
+                            ("http://schemas.microsoft.com/mapi/proptag/0x7FFE000B", true)
+                        })
+                        {
+                            try { ((dynamic)properties).SetProperty(schema, value); }
+                            catch (COMException exception)
+                            {
+                                throw new OutlookMailException($"Outlook could not prepare embedded photo metadata at {schema} (0x{exception.HResult:X8}). No Send call started. Check that this account supports embedded photos.");
+                            }
+                        }
                     }
                 }
                 finally

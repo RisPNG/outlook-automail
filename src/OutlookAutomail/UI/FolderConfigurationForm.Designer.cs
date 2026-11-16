@@ -30,8 +30,6 @@ internal sealed partial class FolderConfigurationForm
     private Button _removeSchedule = null!;
     private CheckBox _sendEmpty = null!;
     private CheckBox _waitForFiles = null!;
-    private NumericUpDown _readySeconds = null!;
-    private NumericUpDown _maximumMb = null!;
     private Button _save = null!;
     private Button _cancel = null!;
     private TabControl _editorTabs = null!;
@@ -225,7 +223,7 @@ internal sealed partial class FolderConfigurationForm
         _removeSchedule = new Button { Text = "&Remove schedule", AutoSize = true };
         scheduleActions.Controls.AddRange([_addSchedule, _removeSchedule]);
         scheduleLayout.Controls.Add(scheduleActions, 0, 2);
-        var sending = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, RowCount = 4 };
+        var sending = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, RowCount = 2 };
         sending.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         sending.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         _sendEmpty = new CheckBox { Text = "Send the message even when there are no attachments", AutoSize = true, Dock = DockStyle.Fill };
@@ -234,14 +232,8 @@ internal sealed partial class FolderConfigurationForm
         sending.SetColumnSpan(_sendEmpty, 2);
         sending.Controls.Add(_waitForFiles, 0, 1);
         sending.SetColumnSpan(_waitForFiles, 2);
-        sending.Controls.Add(new Label { Text = "File readiness delay (seconds)", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 10, 14, 6) }, 0, 2);
-        _readySeconds = new NumericUpDown { Minimum = 0, Maximum = 86400, Width = 100, AccessibleName = "File readiness delay in seconds", Margin = new Padding(3, 7, 3, 3) };
-        sending.Controls.Add(_readySeconds, 1, 2);
-        sending.Controls.Add(new Label { Text = "Maximum message size (MB)", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 6, 14, 6) }, 0, 3);
-        _maximumMb = new NumericUpDown { Minimum = 1, Maximum = 150, Width = 100, AccessibleName = "Maximum message size in megabytes" };
-        sending.Controls.Add(_maximumMb, 1, 3);
         scheduleLayout.Controls.Add(sending, 0, 3);
-        scheduleLayout.Controls.Add(new Label { Text = "Files must remain unchanged for the readiness delay before sending. The message size includes attachment encoding. Your Outlook account's mail limits still apply. Files are archived after Outlook confirms the message is in Sent Items.", AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(3, 12, 3, 0) }, 0, 4);
+        scheduleLayout.Controls.Add(new Label { Text = "Ready files are processed at the scheduled check without an extra delay. Finish files outside the To send folder, then move them into place. Outlook and mail server limits still apply. Files are archived after Outlook confirms sending.", AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(3, 12, 3, 0) }, 0, 4);
         scheduleTab.Controls.Add(scheduleLayout);
 
         var buttons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Margin = new Padding(0, 12, 0, 0) };

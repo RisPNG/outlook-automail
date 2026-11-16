@@ -91,7 +91,7 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
             var configuration = FolderStore.LoadConfiguration(root);
             var state = FolderStore.LoadState(root, configuration);
             var run = FolderStore.LoadRun(root, runId);
-            if (run.Status is not (RunStatus.Submitting or RunStatus.Queued or RunStatus.NeedsReview))
+            if (run.PartIds.Count != 0 || run.Status is not (RunStatus.Submitting or RunStatus.Queued or RunStatus.NeedsReview or RunStatus.SizeBlocked))
                 throw new InvalidOperationException("Only a queued or uncertain submission can be manually confirmed as sent.");
             run.Status = RunStatus.Sent;
             run.Detail = "The user manually confirmed that this message was sent.";
@@ -99,7 +99,8 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
             FolderStore.RecordOutcome(root, run);
             FolderStore.SaveRun(root, run);
             CompleteBatch(root, state, run);
-            StatusChanged?.Invoke(new(root, configuration.Name, "Archived", run.Detail, run.UpdatedUtc));
+            StatusChanged?.Invoke(new(root, configuration.Name, run.ParentBatchId is null ? "Archived" : "Part archived",
+                run.ParentBatchId is null ? run.Detail : "The selected part was confirmed and archived. The split batch remains active until every part completes.", run.UpdatedUtc));
         }
         finally
         {
@@ -232,8 +233,14 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
                         $"Select {unresolved.AccountAddress} in classic Outlook to check this submission. This batch will not be sent again automatically.", unresolved.CreatedUtc));
                     return;
                 }
-                ObserveSubmission(root, unresolved,
-                    await mailClient.GetSubmissionStatusAsync(unresolved.DraftId, cancellationToken));
+                var observation = await mailClient.GetSubmissionStatusAsync(unresolved.DraftId, cancellationToken);
+                if (unresolved.Status == RunStatus.NeedsReview && observation is MailSubmissionStatus.Draft or MailSubmissionStatus.Missing
+                    && Directory.EnumerateFiles(Path.Combine(root, FolderStore.MetadataFolder, "runs", unresolved.Id), "preflight-*.json").Any())
+                {
+                    StatusChanged?.Invoke(new(root, configuration.Name, "Needs review", unresolved.Detail, unresolved.UpdatedUtc));
+                    return;
+                }
+                ObserveSubmission(root, unresolved, observation);
                 if (unresolved.Status == RunStatus.Sent)
                 {
                     CompleteBatch(root, state, unresolved);
@@ -246,6 +253,11 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
                         unresolved.Status == RunStatus.Queued ? "Queued in Outlook" : "Needs review", unresolved.Detail, unresolved.CreatedUtc));
                     return;
                 }
+            }
+            if (active?.Status == RunStatus.Split)
+            {
+                await ProcessSplitBatchAsync(root, state, active, account, configuration, manual, recoveryOnly, cancellationToken);
+                return;
             }
             if (recoveryOnly)
             {
@@ -278,11 +290,12 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
                 }
             }
             var run = active;
-            if (run?.Status == RunStatus.Rejected)
+            if (run?.Status is RunStatus.Rejected or RunStatus.SizeBlocked)
             {
-                if (!manual)
+                if (!manual && (run.Status == RunStatus.SizeBlocked || !Directory.EnumerateFiles(
+                        Path.Combine(root, FolderStore.MetadataFolder, "runs", run.Id), "preflight-*.json").Any()))
                 {
-                    StatusChanged?.Invoke(new(root, configuration.Name, "Rejected", "Outlook did not submit the message. Correct the cause and use Run now to retry this batch.", run.UpdatedUtc));
+                    StatusChanged?.Invoke(new(root, configuration.Name, run.Status == RunStatus.SizeBlocked ? "Size blocked" : "Rejected", run.Detail + " Correct the cause and use Run now to retry this batch.", run.UpdatedUtc));
                     return;
                 }
             }
@@ -299,11 +312,6 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
                     .Select(path => new FileInfo(path)).OrderBy(file => file.Name, StringComparer.OrdinalIgnoreCase).ToList();
                 if (files.Any(file => file.Attributes.HasFlag(FileAttributes.ReparsePoint)))
                     throw new InvalidDataException("Attachment files cannot be file links.");
-                if (files.Any(file => file.LastWriteTimeUtc > clock.GetUtcNow().UtcDateTime.AddSeconds(-configuration.FileReadySeconds)))
-                {
-                    StatusChanged?.Invoke(new(root, configuration.Name, "Waiting for files", "Some files are still changing or have not reached the readiness delay."));
-                    return;
-                }
                 if (files.Count == 0 && !configuration.SendWhenEmpty && configuration.WaitForFiles)
                 {
                     StatusChanged?.Invoke(new(root, configuration.Name, "Waiting for files", "The due schedule will run when files become available."));
@@ -334,7 +342,6 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
                     Cc = [.. configuration.Cc]
                 };
                 run.DraftId = run.Id;
-                long estimatedSize = 8192 + Encoding.UTF8.GetByteCount(run.Subject) * 2L + Encoding.UTF8.GetByteCount(run.Body) * 2L;
                 var imageStreams = new Dictionary<string, Stream>(StringComparer.OrdinalIgnoreCase);
                 try
                 {
@@ -343,8 +350,6 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
                         try
                         {
                             using var stream = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.None);
-                            var base64Size = ((stream.Length + 2) / 3) * 4;
-                            estimatedSize += base64Size + ((base64Size + 75) / 76) * 2 + 2048;
                             run.Attachments.Add(new RunAttachment
                             {
                                 Name = file.Name,
@@ -366,11 +371,6 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
                         {
                             var path = FolderStore.ResolveInlineImage(root, configuration, image);
                             var file = new FileInfo(path);
-                            if (file.LastWriteTimeUtc > clock.GetUtcNow().UtcDateTime.AddSeconds(-configuration.FileReadySeconds))
-                            {
-                                StatusChanged?.Invoke(new(root, configuration.Name, "Waiting for files", "An embedded photo has not reached the readiness delay."));
-                                return;
-                            }
                             FileStream stream;
                             try { stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None); }
                             catch (IOException exception) when ((exception.HResult & 0xffff) is 32 or 33)
@@ -395,13 +395,9 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
                             }
                             attachment.Length = stream.Length;
                             attachment.LastWriteUtc = file.LastWriteTimeUtc;
-                            var base64Size = ((attachment.Length + 2) / 3) * 4;
-                            estimatedSize += base64Size + ((base64Size + 75) / 76) * 2 + 2048;
                             run.Attachments.Add(attachment);
                         }
                     }
-                    if (estimatedSize > configuration.MaximumMessageSizeMb * 1024L * 1024)
-                        throw new InvalidDataException($"The batch exceeds the configured {configuration.MaximumMessageSizeMb} MB message limit after email encoding. Remove files or increase the limit before retrying.");
                     run = FolderStore.CreateBatch(root, run, imageStreams);
                 }
                 finally
@@ -419,15 +415,32 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
                 }
             }
             StatusChanged?.Invoke(new(root, configuration.Name, "Sending", "Preparing the attachment batch.", run.CreatedUtc));
-            run = await SubmitBatchAsync(root, run, account, configuration, cancellationToken);
+            try
+            {
+                if (Directory.EnumerateFiles(Path.Combine(root, FolderStore.MetadataFolder, "runs", run.Id), "preflight-*.json").Any())
+                    run = await PartitionBatchAsync(root, run, account, configuration,
+                        new MailSizeLimitException(null, "Resuming a recorded size-recovery preflight. No new original submission is permitted.", "recorded draft preparation"), cancellationToken);
+                else
+                    run = await SubmitBatchAsync(root, run, account, configuration, cancellationToken);
+            }
+            catch (MailSizeLimitException exception)
+            {
+                AppLog.Write($"Batch {run.Id}: confirmed size failure before submission during {exception.Stage}.", exception);
+                run = await PartitionBatchAsync(root, FolderStore.LoadRun(root, run.Id), account, configuration, exception, cancellationToken);
+            }
+            if (run.Status == RunStatus.Split)
+            {
+                await ProcessSplitBatchAsync(root, state, run, account, configuration, manual, false, cancellationToken);
+                return;
+            }
             if (run.Status is RunStatus.Sent or RunStatus.Archived)
             {
                 CompleteBatch(root, state, run);
                 StatusChanged?.Invoke(new(root, configuration.Name, "Archived", run.Detail, run.UpdatedUtc));
             }
             else
-                StatusChanged?.Invoke(new(root, configuration.Name, run.Status == RunStatus.Queued ? "Queued in Outlook" : "Needs review",
-                    run.Status == RunStatus.Queued ? run.Detail : "This batch already has a submission claim. Reconcile its result before continuing.", run.UpdatedUtc));
+                StatusChanged?.Invoke(new(root, configuration.Name, run.Status == RunStatus.Queued ? "Queued in Outlook"
+                    : run.Status == RunStatus.SizeBlocked ? "Size blocked" : run.Status.ToString(), run.Detail, run.UpdatedUtc));
         }
         finally
         {
@@ -441,28 +454,26 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
         FolderConfiguration configuration, CancellationToken cancellationToken)
     {
         run = FolderStore.LoadRun(root, run.Id);
-        if (run.Status is not (RunStatus.Preparing or RunStatus.DraftReady or RunStatus.Rejected))
+        if (run.Status is not (RunStatus.Preparing or RunStatus.DraftReady or RunStatus.Rejected or RunStatus.SizeBlocked))
             return run;
-        var retryRejected = run.Status == RunStatus.Rejected;
-        var rendered = retryRejected ? MessageTemplate.Render(configuration, run.CreatedUtc) : (run.Subject, run.Body);
-        var imageReferences = FolderStore.ValidateInlineImageReferences(rendered.Body, retryRejected ? configuration.BodyIsHtml : run.BodyIsHtml,
+        if (run.ParentBatchId is not null && run.AccountId != account.Id)
+            throw new OutlookMailException($"Select the original account {run.AccountAddress} to continue this mail part.");
+        var retryRejected = run.Status is RunStatus.Rejected or RunStatus.SizeBlocked;
+        var editMessage = retryRejected && run.ParentBatchId is null;
+        var rendered = editMessage ? MessageTemplate.Render(configuration, run.CreatedUtc) : (run.Subject, run.Body);
+        var imageReferences = FolderStore.ValidateInlineImageReferences(rendered.Body, editMessage ? configuration.BodyIsHtml : run.BodyIsHtml,
             run.Attachments.Where(attachment => attachment.ContentId is not null).Select(attachment => attachment.ContentId!));
-        long batchSize = 8192 + Encoding.UTF8.GetByteCount(rendered.Subject) * 2L + Encoding.UTF8.GetByteCount(rendered.Body) * 2L;
-        foreach (var attachment in run.Attachments.Where(attachment => attachment.ContentId is null || imageReferences.Contains(attachment.ContentId)))
-        {
-            var base64Size = ((attachment.Length + 2) / 3) * 4;
-            batchSize += base64Size + ((base64Size + 75) / 76) * 2 + 2048;
-        }
-        if (batchSize > configuration.MaximumMessageSizeMb * 1024L * 1024)
-            throw new InvalidDataException("This recorded batch exceeds the current message size limit. Increase the limit before retrying.");
         if (retryRejected)
         {
             run.Status = RunStatus.Preparing;
             run.Subject = rendered.Subject;
             run.Body = rendered.Body;
-            run.BodyIsHtml = configuration.BodyIsHtml;
-            run.To = [.. configuration.To];
-            run.Cc = [.. configuration.Cc];
+            if (editMessage)
+            {
+                run.BodyIsHtml = configuration.BodyIsHtml;
+                run.To = [.. configuration.To];
+                run.Cc = [.. configuration.Cc];
+            }
         }
         var pending = FolderStore.ResolveFolder(root, run.PendingFolder);
         var directory = Path.Combine(root, FolderStore.MetadataFolder, "runs", run.Id, "attachments");
@@ -476,8 +487,15 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
                     throw new InvalidDataException("The attachment manifest contains an invalid file name.");
                 var staged = Path.Combine(root, FolderStore.MetadataFolder, "runs", run.Id,
                     attachment.ContentId is null ? "attachments" : "images", attachment.Name);
+                if (attachment.ContentId is null && run.ParentBatchId is not null && File.Exists(staged)
+                    && File.Exists(Path.Combine(root, FolderStore.MetadataFolder, "runs", run.ParentBatchId, "attachments", attachment.Name)))
+                    throw new InvalidDataException($"Both parent and part contain '{attachment.Name}'. Review the frozen batch before continuing.");
                 if (attachment.ContentId is null && !File.Exists(staged))
-                    File.Move(Path.Combine(pending, attachment.Name), staged);
+                {
+                    var source = run.ParentBatchId is null ? Path.Combine(pending, attachment.Name)
+                        : Path.Combine(root, FolderStore.MetadataFolder, "runs", run.ParentBatchId, "attachments", attachment.Name);
+                    File.Move(source, staged);
+                }
                 var stream = new FileStream(staged, FileMode.Open, FileAccess.Read, FileShare.Read);
                 streams.Add(stream);
                 if (stream.Length != attachment.Length || Convert.ToHexString(SHA256.HashData(stream)) != attachment.Sha256)
@@ -566,6 +584,188 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
         }
     }
 
+    private async Task<RunRecord> PartitionBatchAsync(string root, RunRecord run, MailAccount account, FolderConfiguration configuration,
+        MailSizeLimitException rejection, CancellationToken cancellationToken)
+    {
+        if (account.Id != run.AccountId)
+            throw new OutlookMailException($"Select the original account {run.AccountAddress} to resume size recovery for this batch.");
+        FolderStore.EnableMultipart(root, configuration);
+        var directory = Path.Combine(root, FolderStore.MetadataFolder, "runs", run.Id);
+        var originalStatus = await mailClient.GetSubmissionStatusAsync(run.Id, cancellationToken);
+        if (originalStatus is MailSubmissionStatus.Sent or MailSubmissionStatus.Queued)
+        {
+            ObserveSubmission(root, run, originalStatus);
+            return run;
+        }
+        if (originalStatus == MailSubmissionStatus.Draft)
+            await mailClient.DeleteDraftAsync(run.Id, cancellationToken);
+        foreach (var path in Directory.EnumerateFiles(directory, "preflight-*.json"))
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            var previous = JsonSerializer.Deserialize<List<RunRecord>>(stream, FolderStore.JsonOptions)
+                ?? throw new InvalidDataException("A mail part preflight record is empty.");
+            await ClearTrialDraftsAsync(root, run, previous, cancellationToken);
+        }
+        var documents = run.Attachments.Where(attachment => attachment.ContentId is null)
+            .OrderByDescending(attachment => attachment.Length).ThenBy(attachment => attachment.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        var references = FolderStore.ValidateInlineImageReferences(run.Body, run.BodyIsHtml,
+            run.Attachments.Where(attachment => attachment.ContentId is not null).Select(attachment => attachment.ContentId!));
+        var images = run.Attachments.Where(attachment => attachment.ContentId is not null && references.Contains(attachment.ContentId)).ToList();
+        var maximumBytes = rejection.MaximumMessageBytes;
+        for (var count = 2; count <= documents.Count; count++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var groups = Enumerable.Range(0, count).Select(_ => new List<RunAttachment>()).ToList();
+            foreach (var document in documents)
+                groups.OrderBy(group => group.Sum(attachment => attachment.Length)).First().Add(document);
+            groups = groups.OrderByDescending(group => group.Sum(attachment => attachment.Length)).ToList();
+            var parts = groups.Select((group, index) => new RunRecord
+            {
+                Transport = FolderStore.CurrentTransport,
+                ParentBatchId = run.Id,
+                PartNumber = index + 1,
+                PartCount = count,
+                CreatedUtc = run.CreatedUtc,
+                UpdatedUtc = clock.GetUtcNow(),
+                Status = RunStatus.Preparing,
+                AccountId = run.AccountId,
+                AccountAddress = run.AccountAddress,
+                WorkerName = run.WorkerName,
+                PendingFolder = run.PendingFolder,
+                SentFolder = run.SentFolder,
+                Subject = run.Subject + $" [Part {index + 1}/{count}]",
+                Body = run.Body,
+                BodyIsHtml = run.BodyIsHtml,
+                To = [.. run.To],
+                Cc = [.. run.Cc],
+                Attachments = [.. group, .. images]
+            }).ToList();
+            foreach (var part in parts)
+                part.DraftId = part.Id;
+            var messages = parts.Select(part => new MailMessage(part.Id, part.Subject, part.Body, part.BodyIsHtml, part.To, part.Cc,
+                part.Attachments.Select(attachment => new MailAttachment(attachment.Name,
+                    Path.Combine(directory, attachment.ContentId is null ? "attachments" : "images", attachment.Name),
+                    attachment.Length, attachment.ContentId, attachment.ContentType)).ToList())).ToList();
+            if (maximumBytes is > 0 && messages.Any(message => message.EstimatedEncodedBytes > maximumBytes.Value))
+                continue;
+            FolderStore.WriteDurableFile(Path.Combine(directory, "preflight-" + Guid.NewGuid().ToString("N") + ".json"),
+                JsonSerializer.Serialize(parts, FolderStore.JsonOptions), false);
+            var tooLarge = false;
+            try
+            {
+                foreach (var message in messages)
+                {
+                    await mailClient.CreateDraftAsync(message, cancellationToken);
+                    await mailClient.AddAttachmentsAsync(message.BatchId, message.Attachments, cancellationToken);
+                }
+            }
+            catch (MailSizeLimitException exception)
+            {
+                tooLarge = true;
+                if (exception.MaximumMessageBytes is > 0)
+                    maximumBytes = maximumBytes is > 0 ? Math.Min(maximumBytes.Value, exception.MaximumMessageBytes.Value) : exception.MaximumMessageBytes;
+                AppLog.Write($"Batch {run.Id}: {count}-part draft preflight exceeded the provider size limit. No part was submitted.", exception);
+            }
+            if (tooLarge)
+            {
+                await ClearTrialDraftsAsync(root, run, parts, cancellationToken);
+                continue;
+            }
+            FolderStore.PublishSplitPlan(root, new SplitBatchPlan { Parent = run, Parts = parts });
+            AppLog.Write($"Batch {run.Id}: published {count} mail parts, original account {run.AccountId}, size evidence: {rejection.Evidence}");
+            return FolderStore.LoadRun(root, run.Id);
+        }
+        run.Status = RunStatus.SizeBlocked;
+        var repeatedSize = new MailMessage(run.Id, run.Subject + " [Part 1/1]", run.Body, run.BodyIsHtml, run.To, run.Cc,
+            images.Select(image => new MailAttachment(image.Name, "", image.Length, image.ContentId, image.ContentType)).ToList()).EstimatedEncodedBytes;
+        var blockingContent = documents.Count == 0 || maximumBytes is > 0 && repeatedSize >= maximumBytes.Value
+            ? "The repeated message body/photos" : $"The document '{documents[0].Name}' with the repeated message/photos";
+        run.Detail = blockingContent + " cannot fit the Outlook limit"
+            + (maximumBytes is > 0 ? $" of {maximumBytes.Value} bytes" : " detected during preparation")
+            + ". No email parts were submitted. Increase the provider limit or send/share the entire frozen batch separately, then confirm that exact batch as sent. Do not replace its staged files or delete .automail.";
+        run.UpdatedUtc = clock.GetUtcNow();
+        FolderStore.SaveRun(root, run);
+        return run;
+    }
+
+    private async Task ClearTrialDraftsAsync(string root, RunRecord parent, IReadOnlyList<RunRecord> trials, CancellationToken cancellationToken)
+    {
+        foreach (var part in trials)
+        {
+            if (!Guid.TryParseExact(part.Id, "N", out _) || part.ParentBatchId != parent.Id || part.AccountId != parent.AccountId)
+                throw new InvalidDataException("A mail part preflight record has invalid ownership.");
+            var status = await mailClient.GetSubmissionStatusAsync(part.Id, cancellationToken);
+            if (status is MailSubmissionStatus.Queued or MailSubmissionStatus.Sent)
+            {
+                parent.Status = RunStatus.NeedsReview;
+                parent.Detail = $"Trial mail {part.Id} was submitted outside automatic processing. Review which documents were sent. Complete the entire frozen batch separately before confirming that batch as sent. No automatic resend is permitted.";
+                parent.UpdatedUtc = clock.GetUtcNow();
+                FolderStore.SaveRun(root, parent);
+                throw new InvalidOperationException(parent.Detail);
+            }
+            if (status == MailSubmissionStatus.Draft)
+                await mailClient.DeleteDraftAsync(part.Id, cancellationToken);
+        }
+    }
+
+    private async Task ProcessSplitBatchAsync(string root, FolderState state, RunRecord parent, MailAccount account,
+        FolderConfiguration configuration, bool manual, bool recoveryOnly, CancellationToken cancellationToken)
+    {
+        var plan = FolderStore.LoadSplitPlan(root, parent.Id);
+        if (account.Id != parent.AccountId)
+        {
+            StatusChanged?.Invoke(new(root, configuration.Name, "Needs review", $"Select the original account {parent.AccountAddress} to continue this split batch."));
+            return;
+        }
+        var archived = 0;
+        foreach (var recorded in plan.Parts)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var imageStreams = new Dictionary<string, Stream>();
+            RunRecord part;
+            try
+            {
+                foreach (var image in recorded.Attachments.Where(attachment => attachment.ContentId is not null))
+                    imageStreams.Add(image.Name, new FileStream(Path.Combine(root, FolderStore.MetadataFolder, "runs", parent.Id, "images", image.Name),
+                        FileMode.Open, FileAccess.Read, FileShare.Read));
+                part = FolderStore.CreateBatch(root, recorded, imageStreams);
+            }
+            finally
+            {
+                foreach (var stream in imageStreams.Values)
+                    stream.Dispose();
+            }
+            if (part.Status is RunStatus.Submitting or RunStatus.Queued or RunStatus.NeedsReview)
+                ObserveSubmission(root, part, await mailClient.GetSubmissionStatusAsync(part.Id, cancellationToken));
+            if (part.Status is not (RunStatus.Sent or RunStatus.Archived)
+                && !recoveryOnly && (manual || part.Status is not (RunStatus.Rejected or RunStatus.SizeBlocked)))
+            {
+                try { part = await SubmitBatchAsync(root, part, account, configuration, cancellationToken); }
+                catch (MailSizeLimitException exception)
+                {
+                    part = FolderStore.LoadRun(root, recorded.Id);
+                    part.Status = RunStatus.SizeBlocked;
+                    part.Detail = $"Part {part.PartNumber}/{part.PartCount} no longer fits the provider limit. Earlier parts keep their numbers. Increase the provider limit or send/share this exact part separately and confirm this part as sent. {exception.Message}";
+                    part.UpdatedUtc = clock.GetUtcNow();
+                    FolderStore.SaveRun(root, part);
+                }
+            }
+            if (part.Status is RunStatus.Sent or RunStatus.Archived)
+            {
+                CompleteBatch(root, state, part);
+                archived++;
+                continue;
+            }
+            parent.Detail = $"{archived} of {plan.Parts.Count} parts archived. Part {part.PartNumber}/{part.PartCount}: {part.Status}. {part.Detail}";
+            parent.UpdatedUtc = clock.GetUtcNow();
+            FolderStore.SaveRun(root, parent);
+            StatusChanged?.Invoke(new(root, configuration.Name, "Sending in parts", parent.Detail, parent.UpdatedUtc));
+            return;
+        }
+        CompleteBatch(root, state, parent);
+        StatusChanged?.Invoke(new(root, configuration.Name, "Archived", parent.Detail, parent.UpdatedUtc));
+    }
+
     private void ObserveSubmission(string root, RunRecord run, MailSubmissionStatus observation)
     {
         run.Status = observation switch
@@ -593,9 +793,22 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
             FolderStore.RecordOutcome(root, run);
             FolderStore.SaveRun(root, run);
         }
-        CompleteOccurrence(root, state, run);
-        if (run.Status == RunStatus.Sent)
+        if (run.PartIds.Count != 0)
+        {
+            if (run.PartIds.Any(id => FolderStore.LoadRun(root, id).Status != RunStatus.Archived))
+                throw new InvalidOperationException("All mail parts must finish archiving before their batch can complete.");
+            var originalStaging = Path.Combine(root, FolderStore.MetadataFolder, "runs", run.Id, "attachments");
+            if (Directory.Exists(originalStaging) && Directory.EnumerateFiles(originalStaging).Any())
+                throw new InvalidDataException("The completed split batch still contains parent document copies. Review its files before completing the occurrence.");
+            run.Status = RunStatus.Archived;
+            run.Detail = $"All {run.PartIds.Count} mail parts are confirmed sent and archived. Recipient delivery remains subject to the mail server.";
+            run.UpdatedUtc = clock.GetUtcNow();
+            FolderStore.RecordOutcome(root, run);
+            FolderStore.SaveRun(root, run);
+        }
+        else if (run.Status == RunStatus.Sent)
             ArchiveBatch(root, run);
+        CompleteOccurrence(root, state, run);
         FolderStore.RetireBatch(root, run);
         state.LastRunUtc = clock.GetUtcNow();
         FolderStore.SaveState(root, state);
