@@ -76,7 +76,7 @@ Write-Output "Packaged $Version in $releaseDirectory"
 if (-not $Publish) { return }
 $notesPath = Join-Path $projectRoot 'artifacts/release-notes.md'
 $sourceCommit = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { (& mise exec -- git rev-parse HEAD).Trim() }
-$source = "Built from source commit $sourceCommit after the Windows build, formatting, and test checks passed."
+$source = if ($env:GITHUB_SHA) { "Built from source commit $sourceCommit after the Windows build, formatting, and test checks passed." } else { "Built and published manually from source commit $sourceCommit." }
 Set-Content -LiteralPath $notesPath -Value "Outlook Automail $Version`n`nWindows x64 installer with the .NET runtime included. Classic Outlook is required.`n`n$source" -Encoding utf8
 if (-not $existing) {
     & mise exec -- gh release create $tag --repo $repository --target $sourceCommit --draft --title "Outlook Automail $Version" --notes-file $notesPath
