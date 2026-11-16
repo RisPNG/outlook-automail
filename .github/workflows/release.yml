@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: release-main
@@ -31,5 +31,5 @@ jobs:
         run: mise run test
       - name: Package and publish
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: mise run release -- -Publish

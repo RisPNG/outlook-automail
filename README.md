@@ -4,7 +4,7 @@ A Windows tray application that sends the ready files in a configured folder as 
 
 ## Install and update
 
-Download the [Windows installer](https://github.com/RisPNG/outlook-automail-releases/releases/latest/download/OutlookAutomail-win-Setup.exe). It includes the .NET runtime and installs for the current Windows user. Classic Outlook must already be installed and configured. Public downloads and updates do not need a GitHub login. The source repository is private.
+Download the [Windows installer](https://github.com/RisPNG/outlook-automail/releases/latest/download/OutlookAutomail-win-Setup.exe). It includes the .NET runtime and installs for the current Windows user. Classic Outlook must already be installed and configured. Source code, downloads, and updates are public in this repository. Downloads and updates do not need a GitHub login.
 
 The installed app checks for updates at startup and every six hours, then downloads them in the background. A downloaded update installs when the app is in the tray and processing and Outlook automation are idle. An open window or editor keeps the update pending. You can also use Check for updates and Install update in the window or tray menu. An update never interrupts a send. The app restarts in the tray and keeps local settings and shared-folder history.
 
@@ -173,9 +173,9 @@ The test suite exercises scheduling, worker selection, batch recovery, and Outlo
 
 ## Publish releases
 
-Every push to `main` runs the Windows formatting, build, and full test checks in GitHub Actions. Successful runs package the runtime-included installer and publish it to the public releases repository named in `release.json`. The project's version supplies the major and minor numbers, and the workflow run number supplies the patch, so ordinary pushes do not require a manual version bump. Feature branches do not publish. Rerunning an already published or superseded run leaves published releases unchanged.
+Every push to `main` runs the Windows formatting, build, and full test checks in GitHub Actions. Successful runs package the runtime-included installer and publish a release in this repository, whose URL is shared with the app through `release.json`. The project's version supplies the major and minor numbers, and the workflow run number supplies the patch, so ordinary pushes do not require a manual version bump. Release tags point to the exact commit used to build the package. Feature branches do not publish. Rerunning an already published or superseded run leaves published releases unchanged.
 
-The private source repository needs an Actions secret named `RELEASE_TOKEN`: a fine-grained GitHub token limited to Contents read and write on `RisPNG/outlook-automail-releases`. It must be renewed before expiry. Do not use an employee's broad GitHub login token or put credentials in application configuration. The app reads public releases without credentials.
+The workflow uses GitHub's automatic `GITHUB_TOKEN` with Contents write permission for this repository. No personal publishing token or extra repository secret is needed. The app reads public releases without credentials. The former `outlook-automail-releases` address redirects here so existing installations keep updating. Do not reuse that repository name, because doing so would remove the redirect.
 
 To package locally after running the checks:
 
@@ -183,7 +183,8 @@ To package locally after running the checks:
 mise run format-check
 mise run build
 mise run test
-mise run release -- -Version 1.3.0
+$releaseVersion = Read-Host 'Version to package (major.minor.patch)'
+mise run release -- -Version $releaseVersion
 ```
 
-Choose a version newer than any published release. Packages are written to `artifacts/releases/<version>`. Local packaging does not publish or install the app. The workflow uses the same release command with `-Publish` and a release-scoped `GH_TOKEN` environment variable. Publication stages a draft, verifies the feed's packages, uploads all referenced packages, and only then makes the release public. Velopack manages package verification, delta downloads, installation, and restart.
+Choose a version newer than any published release. Packages are written to `artifacts/releases/<version>`. Local packaging does not publish or install the app. The workflow uses the same release command with `-Publish` and passes its automatic token through `GH_TOKEN`. Publication stages a draft, verifies the feed's packages, uploads all referenced packages, and only then makes the release public. Velopack manages package verification, delta downloads, installation, and restart.

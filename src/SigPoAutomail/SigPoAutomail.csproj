@@ -8,7 +8,7 @@
     <RootNamespace>SigPoAutomail</RootNamespace>
     <Product>Outlook Automail</Product>
     <Description>Scheduled attachment emails through classic Outlook from shared folders.</Description>
-    <Version>1.3.0</Version>
+    <Version>1.4.0</Version>
     <Version Condition="'$(ReleaseVersion)' != ''">$(ReleaseVersion)</Version>
   </PropertyGroup>
   <ItemGroup>

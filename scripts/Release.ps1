@@ -24,7 +24,7 @@ if ($Version -notmatch '^\d+\.\d+\.\d+$') {
 $tag = "v$Version"
 $releaseDirectory = Join-Path $projectRoot "artifacts/releases/$Version"
 if ($Publish) {
-    if (-not $env:GH_TOKEN) { throw 'Publishing requires GH_TOKEN with Contents write permission on the public releases repository.' }
+    if (-not $env:GH_TOKEN) { throw 'Publishing requires GH_TOKEN with Contents write permission on this repository.' }
     $existing = Invoke-RestMethod -Uri "https://api.github.com/repos/$repository/releases/tags/$tag" -Headers @{ Accept = 'application/vnd.github+json'; Authorization = "Bearer $env:GH_TOKEN" } -SkipHttpErrorCheck -StatusCodeVariable existingStatus
     if ($existingStatus -notin @(200, 404)) { throw "Release lookup returned HTTP $existingStatus." }
     if ($existingStatus -eq 404) { $existing = $null }
@@ -75,10 +75,11 @@ foreach ($asset in $feed.Assets) {
 Write-Output "Packaged $Version in $releaseDirectory"
 if (-not $Publish) { return }
 $notesPath = Join-Path $projectRoot 'artifacts/release-notes.md'
-$source = if ($env:GITHUB_SHA) { "Built from source commit $env:GITHUB_SHA after the Windows build, formatting, and test checks passed." } else { 'Built and published manually.' }
+$sourceCommit = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { (& mise exec -- git rev-parse HEAD).Trim() }
+$source = "Built from source commit $sourceCommit after the Windows build, formatting, and test checks passed."
 Set-Content -LiteralPath $notesPath -Value "Outlook Automail $Version`n`nWindows x64 installer with the .NET runtime included. Classic Outlook is required.`n`n$source" -Encoding utf8
 if (-not $existing) {
-    & mise exec -- gh release create $tag --repo $repository --draft --title "Outlook Automail $Version" --notes-file $notesPath
+    & mise exec -- gh release create $tag --repo $repository --target $sourceCommit --draft --title "Outlook Automail $Version" --notes-file $notesPath
 }
 & mise exec -- gh release upload $tag --repo $repository --clobber @($assets.FullName)
 & mise exec -- gh release edit $tag --repo $repository --draft=false --latest
