@@ -147,6 +147,35 @@ Write `{{date}}` or `{{date:yyyy-MM-dd}}` to include that placeholder literally.
 
 The date is captured when the batch is first created. A missed schedule processed today uses today's date in the chosen message time zone. The rendered subject and body are saved with the batch, so another PC or a later recovery does not change them. An intentional retry after a definite rejection can apply edited message settings, using the original batch creation instant. Existing configurations without date settings use `dd/MM/yyyy` and `UTC`; messages without placeholders keep their existing text.
 
+## Variables for each computer
+
+The shared subject and body can contain custom placeholders such as `{name}` and `{department}` alongside date placeholders. Open the folder editor's Variables tab on each PC to enter its values. The recipient preview uses that installation's values. Names are case-sensitive, start with an ASCII letter or underscore, and contain only ASCII letters, digits, and underscores. `date` is reserved for dates. Values are plain text without line breaks. An explicitly empty value produces empty text.
+
+The same `config.yml` stores all machine profiles, keyed by the stable `installation_id` in that Windows user's local settings. Computer names are display labels. Two Windows users on one PC have separate identities. Normal app updates retain the identity. Resetting local settings creates a new identity whose values must be configured again.
+
+For example, the message and variable portion of a configuration can contain:
+
+```yaml
+subject: "Documents from {name} - {date}"
+body: "Best Regards,\n{name}"
+body_is_html: false
+machine_variables:
+- installation_id: "11111111111111111111111111111111"
+  machine_name: OFFICE-PC-1
+  values:
+    name: Jason
+- installation_id: "22222222222222222222222222222222"
+  machine_name: OFFICE-PC-2
+  values:
+    name: Lucia
+```
+
+The IDs above are examples. Use the app to associate values with the actual installation. Saving from one PC preserves the latest values for other PCs under the shared folder lock. The other shared settings retain their existing save behaviour.
+
+A name becomes a variable when any machine profile defines it. An unknown placeholder remains literal text. A defined variable referenced in the subject or body requires a value for the installation preparing the message. Missing values prevent preparation, and an unconfigured primary lets a configured backup take priority. `{{name}}` includes a defined placeholder literally as `{name}`. Values are substituted once and encoded as text in an HTML body, so braces or HTML inside a value do not become another template or markup.
+
+The rendered subject and body are frozen when the batch is created. Ordinary recovery, backup takeover, and split emails keep that text. An intentional retry of an original rejected batch uses the retrying installation's current values and the original batch creation time, following the existing message-editing rules. Update every PC before saving `machine_variables`, because older clients reject the new configuration key.
+
 ## Priority and scheduling
 
 For each shared folder, the first registered worker has priority. Later workers are backups in registration order. Workers publish availability heartbeats while their folder is enabled and their account is usable. A backup can take over after a preferred worker becomes unavailable. A missed heartbeat only affects preference for new work. It never revokes a lock on an active run.

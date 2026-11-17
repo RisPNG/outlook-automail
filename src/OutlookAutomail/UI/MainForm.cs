@@ -260,7 +260,7 @@ internal sealed partial class MainForm : Form
             var existing = await Task.Run(() => File.Exists(Path.Combine(root, "config.yml")));
             if (!existing)
             {
-                using var editor = new FolderConfigurationForm(root, new FolderConfiguration { Name = Path.GetFileName(root) });
+                using var editor = new FolderConfigurationForm(root, new FolderConfiguration { Name = Path.GetFileName(root) }, _application.Settings.InstallationId);
                 if (editor.ShowDialog(this) != DialogResult.OK)
                     return;
             }
@@ -293,7 +293,7 @@ internal sealed partial class MainForm : Form
         try
         {
             var configuration = await Task.Run(() => FolderStore.LoadConfiguration(subscription.RootPath));
-            using var editor = new FolderConfigurationForm(subscription.RootPath, configuration);
+            using var editor = new FolderConfigurationForm(subscription.RootPath, configuration, _application.Settings.InstallationId);
             if (editor.ShowDialog(this) == DialogResult.OK)
             {
                 await _application.RestartEngineAsync();

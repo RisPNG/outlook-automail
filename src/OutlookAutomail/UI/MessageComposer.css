@@ -91,7 +91,7 @@ body {
     max-width: 100%;
 }
 
-#editor [data-dateexpression] {
+#editor [data-placeholder] {
     display: inline;
     border: 1px solid var(--placeholder-border);
     border-radius: 3px;

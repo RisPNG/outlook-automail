@@ -198,6 +198,50 @@ public sealed class MessageComposerTests
     });
 
     [Fact]
+    public Task CustomVariablesSurvivePartialFormattingAndRenderTheCurrentComputersFooter() => RunComposerAsync("", false, async session =>
+    {
+        await session.Browser.ExecuteScriptAsync("document.getElementById('editor').focus(); document.execCommand('insertText', false, 'Best Regards, {name} / {{name}}');");
+        Assert.True(await session.ReadAsync<bool>("""
+            (() => {
+                const text = document.getElementById('editor').firstChild;
+                const start = text.data.indexOf('name');
+                const range = document.createRange();
+                range.setStart(text, start);
+                range.setEnd(text, start + 4);
+                const selection = window.getSelection();
+                selection.removeAllRanges();
+                selection.addRange(range);
+                document.dispatchEvent(new Event('selectionchange'));
+                return true;
+            })()
+            """));
+        await session.ClickFormattingAsync("Bold (Ctrl+B)");
+        await session.Composer.CaptureBodyAsync();
+        const string installationId = "11111111111111111111111111111111";
+        var configuration = new FolderConfiguration
+        {
+            Subject = "Documents from {name}",
+            Body = session.Composer.Body,
+            BodyIsHtml = true,
+            MachineVariables =
+            [
+                new() { InstallationId = installationId, Values = new() { ["name"] = "Jason <Sales &> {date}" } },
+                new() { InstallationId = "22222222222222222222222222222222", Values = new() { ["name"] = "Lucia" } }
+            ]
+        };
+        Assert.Contains("{name}", configuration.Body);
+        var rendered = MessageTemplate.Render(configuration, DateTimeOffset.UtcNow, installationId);
+        Assert.Equal("Documents from Jason <Sales &> {date}", rendered.Subject);
+        Assert.Contains("Jason &lt;Sales &amp;&gt; {date}", rendered.Body);
+        await session.UpdatePreviewAsync(rendered.Subject, rendered.Body);
+        var received = await session.ReadRenderedPreviewAsync();
+        Assert.Contains("Best Regards,", received.Text);
+        Assert.Contains("Jason <Sales &> {date}", received.Text);
+        Assert.Contains("/ {name}", received.Text);
+        Assert.DoesNotContain("Lucia", received.Text);
+    });
+
+    [Fact]
     public Task ExistingFontSelectionCanBeChangedDirectlyToTheDisplayedDefaults() => RunComposerAsync("<p style='font-family:Times New Roman;font-size:20pt'>Imported text</p>", true, async session =>
     {
         var selected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

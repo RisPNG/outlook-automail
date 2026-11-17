@@ -59,7 +59,7 @@ public static class FolderStore
         return configuration;
     }
 
-    public static void SaveConfiguration(string root, FolderConfiguration configuration)
+    public static void SaveConfiguration(string root, FolderConfiguration configuration, string? installationId = null)
     {
         ValidateConfiguration(root, configuration);
         using var ownership = AcquireOwnership(root);
@@ -71,7 +71,11 @@ public static class FolderStore
                 throw new InvalidDataException("The existing folder ID cannot be changed.");
             configuration.SchemaVersion = Math.Max(configuration.SchemaVersion, previous.SchemaVersion);
             configuration.ActiveFromUtc = previous.ActiveFromUtc;
+            if (installationId is not null)
+                configuration.MachineVariables = [.. previous.MachineVariables.Where(machine => !string.Equals(machine.InstallationId, installationId, StringComparison.OrdinalIgnoreCase)),
+                    .. configuration.MachineVariables.Where(machine => string.Equals(machine.InstallationId, installationId, StringComparison.OrdinalIgnoreCase))];
         }
+        ValidateConfiguration(root, configuration);
         Directory.CreateDirectory(ResolveFolder(root, configuration.PendingFolder));
         Directory.CreateDirectory(ResolveFolder(root, configuration.SentFolder));
         WriteDurableFile(path, YamlWriter.Serialize(configuration));

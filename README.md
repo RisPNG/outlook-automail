@@ -22,6 +22,10 @@ Open the folder settings and choose **Message**. Write and format the email, the
 
 Add `{date}` to the subject or message to include the date the email is first prepared. Choose its format and time zone. For example, `Documents - {date}` can become `Documents - 16/11/2026`.
 
+Use the folder editor's **Variables** tab to set values for this computer, then put placeholders such as `{name}` in the shared subject or message. For example, write `Best Regards,` followed by `{name}` on the next line, and set `name` to `Jason` on one PC and `Lucia` on another. Each PC keeps its own values in the same shared `config.yml`. The recipient preview uses the current PC's values.
+
+Update every PC watching the folder before saving variables. Once a variable is defined, each PC using that placeholder needs its own value before it can prepare a new email. Existing batches keep their prepared message during recovery.
+
 ## Send documents
 
 Finish saving or copying documents outside the pending folder, then move them into it. Files in subfolders are not collected. Keep the PC awake, signed in, and connected to the share, with classic Outlook available.

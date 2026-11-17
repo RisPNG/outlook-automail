@@ -155,11 +155,21 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
                 try
                 {
                     var configuration = FolderStore.LoadConfiguration(subscription.RootPath);
+                    var ready = !Volatile.Read(ref paused) && subscription.Enabled && configuration.Enabled && account is not null;
+                    if (ready)
+                    {
+                        try { _ = MessageTemplate.Render(configuration, clock.GetUtcNow(), settings.InstallationId); }
+                        catch (InvalidDataException exception)
+                        {
+                            ready = false;
+                            StatusChanged?.Invoke(new(subscription.RootPath, configuration.Name, "Message needs attention", exception.Message));
+                        }
+                    }
                     FolderStore.WriteHeartbeat(subscription.RootPath, new WorkerHeartbeat
                     {
                         InstallationId = settings.InstallationId,
                         UpdatedUtc = clock.GetUtcNow(),
-                        Ready = !Volatile.Read(ref paused) && subscription.Enabled && configuration.Enabled && account is not null
+                        Ready = ready
                     });
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
@@ -213,11 +223,14 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
                 return;
             }
             var account = await mailClient.GetAccountAsync(cancellationToken);
+            string? messageError = null;
+            try { _ = MessageTemplate.Render(configuration, clock.GetUtcNow(), settings.InstallationId); }
+            catch (InvalidDataException exception) { messageError = exception.Message; }
             FolderStore.WriteHeartbeat(root, new WorkerHeartbeat
             {
                 InstallationId = settings.InstallationId,
                 UpdatedUtc = clock.GetUtcNow(),
-                Ready = !Volatile.Read(ref paused) && account is not null && configuration.Enabled
+                Ready = !Volatile.Read(ref paused) && account is not null && configuration.Enabled && (active is not null || messageError is null)
             });
             if (account is null)
             {
@@ -264,6 +277,8 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
                 StatusChanged?.Invoke(new(root, configuration.Name, "Ready", "Archive and submission recovery completed."));
                 return;
             }
+            if (active is null && messageError is not null)
+                throw new InvalidDataException(messageError);
             if (!manual)
             {
                 WorkerRegistration? preferred = null;
@@ -279,6 +294,11 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
                     if (heartbeat.Ready && heartbeat.UpdatedUtc >= clock.GetUtcNow().AddSeconds(-90)
                         && heartbeat.UpdatedUtc <= clock.GetUtcNow().AddSeconds(90))
                     {
+                        if (active is null)
+                        {
+                            try { _ = MessageTemplate.Render(configuration, clock.GetUtcNow(), worker.InstallationId); }
+                            catch (InvalidDataException) { continue; }
+                        }
                         preferred = worker;
                         break;
                     }
@@ -318,7 +338,7 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
                     return;
                 }
                 var createdUtc = clock.GetUtcNow();
-                var rendered = MessageTemplate.Render(configuration, createdUtc);
+                var rendered = MessageTemplate.Render(configuration, createdUtc, settings.InstallationId);
                 run = new RunRecord
                 {
                     Transport = FolderStore.CurrentTransport,
@@ -460,7 +480,7 @@ public sealed class AutomationEngine(AppSettings settings, IMailClient mailClien
             throw new OutlookMailException($"Select the original account {run.AccountAddress} to continue this mail part.");
         var retryRejected = run.Status is RunStatus.Rejected or RunStatus.SizeBlocked;
         var editMessage = retryRejected && run.ParentBatchId is null;
-        var rendered = editMessage ? MessageTemplate.Render(configuration, run.CreatedUtc) : (run.Subject, run.Body);
+        var rendered = editMessage ? MessageTemplate.Render(configuration, run.CreatedUtc, settings.InstallationId) : (run.Subject, run.Body);
         var imageReferences = FolderStore.ValidateInlineImageReferences(rendered.Body, editMessage ? configuration.BodyIsHtml : run.BodyIsHtml,
             run.Attachments.Where(attachment => attachment.ContentId is not null).Select(attachment => attachment.ContentId!));
         if (retryRejected)

@@ -31,9 +31,18 @@ public sealed class FolderConfiguration
     public List<InlineImageConfiguration> InlineImages { get; set; } = [];
     public string DateFormat { get; set; } = "dd/MM/yyyy";
     public string DateTimeZoneId { get; set; } = "UTC";
+    [YamlDotNet.Serialization.YamlMember(DefaultValuesHandling = YamlDotNet.Serialization.DefaultValuesHandling.OmitEmptyCollections)]
+    public List<MachineVariableConfiguration> MachineVariables { get; set; } = [];
     public bool SendWhenEmpty { get; set; }
     public bool WaitForFiles { get; set; }
     public List<ScheduleConfiguration> Schedules { get; set; } = [new()];
+}
+
+public sealed class MachineVariableConfiguration
+{
+    public string InstallationId { get; set; } = "";
+    public string MachineName { get; set; } = "";
+    public Dictionary<string, string> Values { get; set; } = new(StringComparer.Ordinal);
 }
 
 public sealed class InlineImageConfiguration

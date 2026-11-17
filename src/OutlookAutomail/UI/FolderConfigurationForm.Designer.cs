@@ -16,6 +16,10 @@ internal sealed partial class FolderConfigurationForm
     private Button _insertSubjectDate = null!;
     private Button _insertBodyDate = null!;
     private Label _previewStatus = null!;
+    private DataGridView _variables = null!;
+    private Button _addVariable = null!;
+    private Button _removeVariable = null!;
+    private Label _variablesStatus = null!;
     private Button _addPhoto = null!;
     private Button _insertPhoto = null!;
     private Button _removePhoto = null!;
@@ -48,13 +52,14 @@ internal sealed partial class FolderConfigurationForm
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        var guidance = new Label { Text = "These settings are saved as config.yml in the shared folder and apply to every computer using it. Each computer sends from its selected classic Outlook account.", AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(3, 0, 3, 12) };
+        var guidance = new Label { Text = "These settings are saved as config.yml in the shared folder. The message is shared, and variables can have different values on each computer. Each computer sends from its selected classic Outlook account.", AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(3, 0, 3, 12) };
         layout.Controls.Add(guidance, 0, 0);
         _editorTabs = new TabControl { Dock = DockStyle.Fill };
         var folderTab = new TabPage("Folders and recipients") { Padding = new Padding(12) };
         _messageTab = new TabPage("Message") { Padding = new Padding(12) };
+        var variablesTab = new TabPage("Variables") { Padding = new Padding(12) };
         var scheduleTab = new TabPage("Schedule and sending") { Padding = new Padding(12) };
-        _editorTabs.TabPages.AddRange([folderTab, _messageTab, scheduleTab]);
+        _editorTabs.TabPages.AddRange([folderTab, _messageTab, variablesTab, scheduleTab]);
         layout.Controls.Add(_editorTabs, 0, 1);
 
         var folderLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 7 };
@@ -188,6 +193,42 @@ internal sealed partial class FolderConfigurationForm
         _previewStatus = new Label { AutoSize = true, Dock = DockStyle.Fill, AccessibleName = "Message preview status", Margin = new Padding(3, 8, 3, 0) };
         messageLayout.Controls.Add(_previewStatus, 0, 6);
         _messageTab.Controls.Add(messageLayout);
+
+        var variablesLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5 };
+        variablesLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        variablesLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        variablesLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        variablesLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        variablesLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        variablesLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        variablesLayout.Controls.Add(new Label { Text = $"This computer: {Environment.MachineName}\nInstallation ID: {_installationId}", AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(3, 0, 3, 10) }, 0, 0);
+        variablesLayout.Controls.Add(new Label { Text = "Use a variable such as {name} in the shared subject or body, then enter its value here on each computer. For example, name can be Jason here and Lucia on another computer. Names are case-sensitive and use letters, digits, and underscores, starting with a letter or underscore. The name date is reserved. Values are plain text without line breaks. An unset value must be filled before this computer can send a message using it. Removing a row changes only this computer's values.", AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(3, 0, 3, 12) }, 0, 1);
+        _variables = new DataGridView
+        {
+            Dock = DockStyle.Fill,
+            AllowUserToAddRows = false,
+            AllowUserToDeleteRows = true,
+            AllowUserToResizeRows = false,
+            MultiSelect = false,
+            SelectionMode = DataGridViewSelectionMode.CellSelect,
+            RowHeadersVisible = false,
+            BackgroundColor = SystemColors.Window,
+            BorderStyle = BorderStyle.Fixed3D,
+            EditMode = DataGridViewEditMode.EditOnEnter,
+            AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+            AccessibleName = "Message variables for this computer"
+        };
+        _variables.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Variable name", FillWeight = 35 });
+        _variables.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Value on this computer", FillWeight = 65, DefaultCellStyle = new DataGridViewCellStyle { NullValue = "(not set)" } });
+        variablesLayout.Controls.Add(_variables, 0, 2);
+        var variableActions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0, 5, 0, 8) };
+        _addVariable = new Button { Text = "&Add variable", AutoSize = true };
+        _removeVariable = new Button { Text = "&Remove variable", AutoSize = true };
+        variableActions.Controls.AddRange([_addVariable, _removeVariable]);
+        variablesLayout.Controls.Add(variableActions, 0, 3);
+        _variablesStatus = new Label { AutoSize = true, Dock = DockStyle.Fill, AccessibleName = "Variable preview status", Margin = new Padding(3, 8, 3, 0) };
+        variablesLayout.Controls.Add(_variablesStatus, 0, 4);
+        variablesTab.Controls.Add(variablesLayout);
 
         var scheduleLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5 };
         scheduleLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));

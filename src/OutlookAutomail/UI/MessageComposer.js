@@ -8,7 +8,7 @@ const emailTags = new Set(["A", "ABBR", "ADDRESS", "B", "BIG", "BLOCKQUOTE", "BR
 const blockedTags = new Set(["SCRIPT", "STYLE", "LINK", "META", "TITLE", "BASE", "IFRAME", "FRAME", "FRAMESET", "OBJECT", "EMBED", "APPLET", "FORM", "INPUT", "BUTTON", "SELECT", "OPTION", "TEXTAREA", "SVG", "MATH", "VIDEO", "AUDIO", "SOURCE", "TRACK", "CANVAS", "TEMPLATE"]);
 const emailStyles = new Set(["font-family", "font-size", "font-weight", "font-style", "font-variant", "line-height", "text-decoration", "text-decoration-line", "text-decoration-color", "text-align", "text-indent", "text-transform", "color", "background-color", "vertical-align", "white-space", "border", "border-top", "border-right", "border-bottom", "border-left", "border-color", "border-style", "border-width", "border-collapse", "border-spacing", "padding", "padding-top", "padding-right", "padding-bottom", "padding-left", "margin", "margin-top", "margin-right", "margin-bottom", "margin-left", "width", "height", "min-width", "max-width", "table-layout", "list-style-type", "direction", "word-break", "overflow-wrap"]);
 const editorCommands = new Set(["bold", "italic", "underline", "strikethrough", "subscript", "superscript", "fontname", "forecolor", "backcolor", "hilitecolor", "justifyleft", "justifycenter", "justifyright", "justifyfull", "insertorderedlist", "insertunorderedlist", "indent", "outdent", "createlink", "unlink", "removeformat", "undo", "redo", "selectall", "delete", "forwarddelete", "inserthorizontalrule", "formatblock"]);
-const dateExpressionPattern = /\{\{date(?::[^{}\r\n]+)?\}\}|\{date(?::[^{}\r\n]+)?\}/g;
+const placeholderPattern = /\{\{(?:date:[^{}\r\n]+|[A-Za-z_][A-Za-z0-9_]*)\}\}|\{(?:date:[^{}\r\n]+|[A-Za-z_][A-Za-z0-9_]*)\}/g;
 let images = new Map();
 let savedSelection = null;
 let pendingFontSize = null;
@@ -96,7 +96,7 @@ function sanitizeMessage(html) {
     return { html: parsed.body.innerHTML, blocked };
 }
 
-function findDateExpressions(container) {
+function findPlaceholders(container) {
     const walker = document.createTreeWalker(container, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
     const segments = [];
     let text = "";
@@ -104,11 +104,11 @@ function findDateExpressions(container) {
     while (walker.nextNode()) {
         const node = walker.currentNode;
         if (node.nodeType === Node.ELEMENT_NODE) {
-            if (node.matches("br, img, hr, [data-dateexpression]"))
+            if (node.matches("br, img, hr, [data-placeholder]"))
                 text += "\n";
             continue;
         }
-        if (node.parentElement.closest("[data-dateexpression]"))
+        if (node.parentElement.closest("[data-placeholder]"))
             continue;
         const owner = node.parentElement.closest("address, blockquote, caption, dd, div, dt, h1, h2, h3, h4, h5, h6, li, p, pre, td, th");
         if (owner !== block)
@@ -117,7 +117,7 @@ function findDateExpressions(container) {
         segments.push({ node, start: text.length, end: text.length + node.data.length });
         text += node.data;
     }
-    return [...text.matchAll(dateExpressionPattern)].map(match => {
+    return [...text.matchAll(placeholderPattern)].map(match => {
         const start = segments.find(segment => segment.start <= match.index && segment.end > match.index);
         const endOffset = match.index + match[0].length;
         const end = segments.find(segment => segment.start < endOffset && segment.end >= endOffset);
@@ -128,24 +128,24 @@ function findDateExpressions(container) {
     });
 }
 
-function protectDatePlaceholders(container) {
-    for (const expression of findDateExpressions(container).reverse()) {
+function protectPlaceholders(container) {
+    for (const expression of findPlaceholders(container).reverse()) {
         const token = document.createElement("span");
-        token.dataset.dateexpression = expression.text;
+        token.dataset.placeholder = expression.text;
         token.contentEditable = "false";
         token.draggable = false;
         token.setAttribute("role", "img");
-        token.setAttribute("aria-label", "Date placeholder " + expression.text);
+        token.setAttribute("aria-label", "Message placeholder " + expression.text);
         token.textContent = expression.text;
         expression.range.deleteContents();
         expression.range.insertNode(token);
     }
 }
 
-function selectDateExpressions() {
+function selectPlaceholders() {
     const selection = window.getSelection();
     const range = selection.getRangeAt(0);
-    for (const expression of findDateExpressions(editor)) {
+    for (const expression of findPlaceholders(editor)) {
         const start = range.cloneRange();
         start.collapse(true);
         const end = range.cloneRange();
@@ -268,7 +268,7 @@ window.composer = {
         }
         const sanitized = sanitizeMessage(html);
         editor.innerHTML = sanitized.html;
-        protectDatePlaceholders(editor);
+        protectPlaceholders(editor);
         savedSelection = null;
         notice.hidden = true;
         if (sanitized.blocked)
@@ -300,7 +300,7 @@ window.composer = {
             return false;
         restoreEditorSelection();
         if (!["undo", "redo", "selectall", "delete", "forwarddelete", "inserthorizontalrule"].includes(command))
-            selectDateExpressions();
+            selectPlaceholders();
         let result;
         if (command === "fontsize") {
             const points = Number(value);
@@ -327,7 +327,7 @@ window.composer = {
         restoreEditorSelection();
         const fragment = document.createElement("div");
         fragment.textContent = text;
-        protectDatePlaceholders(fragment);
+        protectPlaceholders(fragment);
         document.execCommand("insertHTML", false, fragment.innerHTML.replace(/\r\n|\r|\n/g, "<br>"));
         clearTimeout(changeTimer);
         window.chrome.webview.postMessage({ type: "changed", html: this.exportBody() });
@@ -364,9 +364,9 @@ window.composer = {
 
     exportBody() {
         const body = editor.cloneNode(true);
-        for (const token of body.querySelectorAll("[data-dateexpression]"))
-            token.replaceWith(document.createTextNode(token.dataset.dateexpression));
-        for (const expression of findDateExpressions(body).reverse()) {
+        for (const token of body.querySelectorAll("[data-placeholder]"))
+            token.replaceWith(document.createTextNode(token.dataset.placeholder));
+        for (const expression of findPlaceholders(body).reverse()) {
             expression.range.deleteContents();
             expression.range.insertNode(document.createTextNode(expression.text));
         }
@@ -439,7 +439,7 @@ editor.addEventListener("paste", async event => {
         const sanitized = sanitizeMessage(html);
         const fragment = document.createElement("div");
         fragment.innerHTML = sanitized.html;
-        protectDatePlaceholders(fragment);
+        protectPlaceholders(fragment);
         document.execCommand("insertHTML", false, fragment.innerHTML);
         if (sanitized.blocked)
             reportBlockedContent();

@@ -5,6 +5,7 @@ namespace OutlookAutomail.UI;
 internal sealed partial class FolderConfigurationForm : Form
 {
     private readonly string _root;
+    private readonly string _installationId;
     private readonly FolderConfiguration _configuration;
     private readonly List<InlineImageConfiguration> _inlineImages;
     private readonly SemaphoreSlim _photoImports = new(1, 1);
@@ -12,9 +13,10 @@ internal sealed partial class FolderConfigurationForm : Form
     private int _pendingImports;
     private int _photoPreviewRevision;
 
-    public FolderConfigurationForm(string root, FolderConfiguration configuration)
+    public FolderConfigurationForm(string root, FolderConfiguration configuration, string installationId)
     {
         _root = root;
+        _installationId = installationId;
         _configuration = configuration;
         _inlineImages = [.. configuration.InlineImages];
         InitializeComponent();
@@ -33,6 +35,38 @@ internal sealed partial class FolderConfigurationForm : Form
         _dateTimeZone.SelectedItem = configuration.DateTimeZoneId;
         _sendEmpty.Checked = configuration.SendWhenEmpty;
         _waitForFiles.Checked = configuration.WaitForFiles;
+        var machineVariables = configuration.MachineVariables.FirstOrDefault(machine => string.Equals(machine.InstallationId, installationId, StringComparison.OrdinalIgnoreCase));
+        foreach (var name in configuration.MachineVariables.SelectMany(machine => machine.Values.Keys).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
+        {
+            var index = _variables.Rows.Add(name);
+            _variables.Rows[index].Cells[1].Value = machineVariables?.Values.GetValueOrDefault(name);
+        }
+        _variables.CellParsing += (_, args) =>
+        {
+            if (args.ColumnIndex == 1)
+            {
+                args.Value = Convert.ToString(args.Value) ?? "";
+                args.ParsingApplied = true;
+            }
+        };
+        _variables.EditingControlShowing += (_, args) =>
+        {
+            if (_variables.CurrentCell is { ColumnIndex: 1, Value: null } && args.Control is TextBox input)
+                input.Clear();
+        };
+        _variables.CellValueChanged += (_, _) => RefreshMessagePreview();
+        _variables.RowsRemoved += (_, _) => RefreshMessagePreview();
+        _addVariable.Click += (_, _) =>
+        {
+            var index = _variables.Rows.Add();
+            _variables.CurrentCell = _variables.Rows[index].Cells[0];
+            _variables.BeginEdit(true);
+        };
+        _removeVariable.Click += (_, _) =>
+        {
+            if (_variables.CurrentRow is not null)
+                _variables.Rows.Remove(_variables.CurrentRow);
+        };
         foreach (var image in _inlineImages)
         {
             var index = _photos.Rows.Add(image.Path);
@@ -131,6 +165,7 @@ internal sealed partial class FolderConfigurationForm : Form
             {
                 await _body.CaptureBodyAsync();
                 _schedules.EndEdit();
+                _variables.EndEdit();
                 var schedules = new List<ScheduleConfiguration>();
                 var days = new[] { DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday, DayOfWeek.Saturday, DayOfWeek.Sunday };
                 foreach (DataGridViewRow row in _schedules.Rows)
@@ -165,11 +200,12 @@ internal sealed partial class FolderConfigurationForm : Form
                     InlineImages = [.. _inlineImages],
                     DateFormat = _dateFormat.Text,
                     DateTimeZoneId = Convert.ToString(_dateTimeZone.SelectedItem) ?? "",
+                    MachineVariables = ReadMachineVariables(),
                     SendWhenEmpty = _sendEmpty.Checked,
                     WaitForFiles = _waitForFiles.Checked && !_sendEmpty.Checked,
                     Schedules = schedules
                 };
-                await Task.Run(() => FolderStore.SaveConfiguration(_root, updated));
+                await Task.Run(() => FolderStore.SaveConfiguration(_root, updated, _installationId));
                 _saving = false;
                 DialogResult = DialogResult.OK;
             }
@@ -188,6 +224,31 @@ internal sealed partial class FolderConfigurationForm : Form
             }
         };
         RefreshMessagePreview();
+    }
+
+    private List<MachineVariableConfiguration> ReadMachineVariables()
+    {
+        var current = new MachineVariableConfiguration { InstallationId = _installationId, MachineName = Environment.MachineName };
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (DataGridViewRow row in _variables.Rows)
+        {
+            var name = Convert.ToString(row.Cells[0].Value)?.Trim() ?? "";
+            var value = row.Cells[1].Value;
+            if (name.Length == 0 && value is null)
+                continue;
+            if (name.Length == 0)
+                throw new InvalidDataException("Enter a name for each variable, for example name.");
+            if (!names.Add(name))
+                throw new InvalidDataException($"The variable '{name}' appears more than once. Use a unique name for each variable.");
+            if (value is not null)
+                current.Values.Add(name, Convert.ToString(value) ?? "");
+            else if (!_configuration.MachineVariables.Any(machine => machine.Values.ContainsKey(name)))
+                throw new InvalidDataException($"Enter a value for '{name}' on this computer.");
+        }
+        var machines = _configuration.MachineVariables.Where(machine => !string.Equals(machine.InstallationId, _installationId, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (current.Values.Count > 0)
+            machines.Add(current);
+        return machines;
     }
 
     private async Task ImportPhotoAsync(string? path, byte[]? bytes)
@@ -285,14 +346,15 @@ internal sealed partial class FolderConfigurationForm : Form
                 Subject = _subject.Text.Trim(),
                 Body = _body.Body,
                 BodyIsHtml = _body.BodyIsHtml,
+                MachineVariables = ReadMachineVariables(),
                 DateFormat = _dateFormat.Text,
                 DateTimeZoneId = Convert.ToString(_dateTimeZone.SelectedItem) ?? ""
-            }, DateTimeOffset.UtcNow);
+            }, DateTimeOffset.UtcNow, _installationId);
             var html = _body.BodyIsHtml ? preview.Body : WebUtility.HtmlEncode(preview.Body).Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n').Replace("\n", "<br>", StringComparison.Ordinal);
             await _body.ShowPreviewAsync(preview.Subject, html);
             if (IsDisposed)
                 return;
-            _previewStatus.Text = "Preview uses the current date and embedded photos. Appearance can vary between email apps.";
+            _previewStatus.Text = "Preview uses this computer's variables, the current date, and embedded photos. Appearance can vary between email apps.";
             _save.Enabled = !_saving && _pendingImports == 0 && _body.CanSave;
         }
         catch (InvalidDataException exception)
@@ -303,6 +365,7 @@ internal sealed partial class FolderConfigurationForm : Form
             _previewStatus.Text = "Preview unavailable: " + exception.Message;
             _save.Enabled = false;
         }
+        _variablesStatus.Text = _previewStatus.Text;
         _addPhoto.Enabled = _body.IsReady && !_saving && _pendingImports == 0;
         _insertBodyDate.Enabled = _addPhoto.Enabled;
         _insertPhoto.Enabled = _addPhoto.Enabled && _photos.SelectedRows.Count > 0;
